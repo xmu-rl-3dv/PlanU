@@ -1,113 +1,76 @@
-<<<<<<< HEAD
-### Overcooked and VirtualHome
+# NeuRIPS 2025 PlanU: Large Language Model Reasoning through Planning under Uncertainty
 
-#### Setup
+![Python 3.8](https://img.shields.io/badge/Python-3.8-blue)
+![Code style](https://img.shields.io/badge/code%20style-black-000000.svg)
+![MIT](https://img.shields.io/badge/license-MIT-blue)
 
-To get started:
+This is the official implementation of **"PlanU: Large Language Model Reasoning through Planning under Uncertainty"** accepted at **NeurIPS 2025**.
 
-1. Clone this repo and install the requirements:
+## 📌 Project Overview
+
+**PlanU** introduces a novel **planning-under-uncertainty framework** that equips Large Language Models (LLMs) with explicit **Monte-Carlo Tree Search (MCTS)** reasoning for long-horizon decision making in stochastic environments.  
+
+## 🎯 Quick Start
+
+### ⚙️ Environment Setup
+
 ```bash
+# 1. Clone repo
+git clone https://github.com/xmu-rl-3dv/PlanU.git
+cd PlanU
+
+# 2. Install dependencies
 pip install -r requirements.txt
 ```
 
-2. Set the path of your local model in 'mcts\overcooked\PlanU_mcts.py' line 827
-   'mcts\virtualhome\PlanU_v1.py' line 539
-    'mcts\virtualhome\PlanU_v2.py' line 965
+### 📂 Overcooked & VirtualHome
 
-3. Run the scripts in folder scripts
+1. Set **local LLM path** in  
+   `mcts/overcooked/PlanU_mcts.py#L827`  
+   `mcts/virtualhome/PlanU_v1.py#L539`  
+   `mcts/virtualhome/PlanU_v2.py#L965`
+
+2. Run scripts  
 ```bash
-sh scripts\PlanU_overcooked.sh
-sh scripts\PlanU_Virtualhome.sh
+sh scripts/PlanU_overcooked.sh
+sh scripts/PlanU_Virtualhome.sh
 ```
 
-### WebShop
+### 📂 WebShop
 
-#### Setup
-For Webshop, our code is adapted from LATS, we really appreciate their efforts to the community.(https://github.com/lapisrocks/LanguageAgentTreeSearch)
-To get started:
-
-1. Clone this repo and move the folder webshop to the WebShop directory:
-
-2. Install WebShop from source and run environment instance locally. Follow the instructions here (https://github.com/princeton-nlp/WebShop)
-
-3. Install the module dependencies into your environment:
-```bash
-pip install -r requirements.txt
-```
-
-4. Set `OPENAI_API_KEY` environment variable to your OpenAI API key:
-```bash
-export OPENAI_API_KEY=<your key>
-```
-
-5. Change localhost in lats.py to your local port running WebShop
-
-6. Set the scripts and run paper experiments
+1. Install WebShop locally ([guide](https://github.com/princeton-nlp/WebShop))  
+2. Export your OpenAI key  
+   - Linux/macOS: `export OPENAI_API_KEY=<your_key>`  
+   - Windows PowerShell: `$env:OPENAI_API_KEY="your_key"`  
+   - Windows CMD: `setx OPENAI_API_KEY "your_key"`  
+3. Update `localhost` in `lats.py` to your WebShop port  
+4. Launch experiments  
 ```bash
 sh planu.sh
 ```
 
-- ``--n_generate_sample``: number of times to prompt during expansion/sampling
-- ``--n_evaluate_sample``: number of times to prompt for state evaluation
-- ``--iterations``: maximum number of trajectories to sample
+**CLI flags**  
+- `--n_generate_sample` : # prompts during expansion  
+- `--n_evaluate_sample` : # prompts for state evaluation  
+- `--iterations`        : max trajectories to sample  
 
-## Trajectories
-``programming/root/`` contains all the trajectories from the paper's experiments on programming. Please use get_acc.py with the log path to get the actual accuracy. HotPotQA and WebShop logs were too large to upload, feel free to email if interested.
+### 📊 Trajectories & Logs
 
-=======
-### Overcooked and VirtualHome
+All runs save to `programming/root/`.  
+Use `python get_acc.py --log_path <dir>` to compute final scores.  
+(HotPotQA & WebShop logs are too large for Git; email us if needed.)
 
-#### Setup
+## 📚 Citation
 
-To get started:
-
-1. Clone this repo and install the requirements:
-```bash
-pip install -r requirements.txt
+```bibtex
+@inproceedings{planu2025,
+  title={PlanU: Large Language Model Reasoning through Planning under Uncertainty},
+  author={Ziwei Deng, Mian Deng, Chenjing Liang, Zeming Gao, Chennan Ma, Chenxing Lin, Haipeng Zhang, Songzhu Mei, Cheng Wang, Siqi Shen},
+  booktitle={NeurIPS},
+  year={2025}
+}
 ```
 
-2. Set the path of your local model in 'mcts\overcooked\PlanU_mcts.py' line 827
-   'mcts\virtualhome\PlanU_v1.py' line 539
-    'mcts\virtualhome\PlanU_v2.py' line 965
+## Acknowledgements
 
-3. Run the scripts in folder scripts
-```bash
-sh scripts\PlanU_overcooked.sh
-sh scripts\PlanU_Virtualhome.sh
-```
-
-### WebShop
-
-#### Setup
-For Webshop, our code is adapted from LATS, we really appreciate their efforts to the community.(https://github.com/lapisrocks/LanguageAgentTreeSearch)
-To get started:
-
-1. Clone this repo and move the folder webshop to the WebShop directory:
-
-2. Install WebShop from source and run environment instance locally. Follow the instructions here (https://github.com/princeton-nlp/WebShop)
-
-3. Install the module dependencies into your environment:
-```bash
-pip install -r requirements.txt
-```
-
-4. Set `OPENAI_API_KEY` environment variable to your OpenAI API key:
-```bash
-export OPENAI_API_KEY=<your key>
-```
-
-5. Change localhost in lats.py to your local port running WebShop
-
-6. Set the scripts and run paper experiments
-```bash
-sh planu.sh
-```
-
-- ``--n_generate_sample``: number of times to prompt during expansion/sampling
-- ``--n_evaluate_sample``: number of times to prompt for state evaluation
-- ``--iterations``: maximum number of trajectories to sample
-
-## Trajectories
-``programming/root/`` contains all the trajectories from the paper's experiments on programming. Please use get_acc.py with the log path to get the actual accuracy. HotPotQA and WebShop logs were too large to upload, feel free to email if interested.
-
->>>>>>> 6cec7b1d07aa73bec9af55f1804bd30d7598685a
+Code adapted from [LATS](https://github.com/lapisrocks/LanguageAgentTreeSearch) and [Overcooked-AI](https://github.com/HumanCompatibleAI/overcooked_ai).
