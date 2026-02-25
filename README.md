@@ -1,4 +1,4 @@
-# NeuRIPS 2025 PlanU: Large Language Model Reasoning through Planning under Uncertainty
+# NeurIPS 2025 PlanU: Large Language Model Reasoning through Planning under Uncertainty
 
 ![Python 3.8](https://img.shields.io/badge/Python-3.8-blue)
 ![Code style](https://img.shields.io/badge/code%20style-black-000000.svg)
