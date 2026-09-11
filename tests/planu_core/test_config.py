@@ -36,6 +36,7 @@ def test_selection_schedule_boundaries():
 
     assert schedule.always_samples(49) is True
     assert schedule.always_samples(50) is False
+    assert schedule.sample_probability_at(49) == 1.0
     assert schedule.sample_probability_at(75) == 0.2
     assert schedule.sample_probability_at(100) == 0.0
 

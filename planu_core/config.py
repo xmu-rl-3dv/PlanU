@@ -21,6 +21,8 @@ class SelectionSchedule:
         return iteration < self.always_sample_before
 
     def sample_probability_at(self, iteration: int) -> float:
+        if self.always_samples(iteration):
+            return 1.0
         if iteration < self.probabilistic_sample_before:
             return self.sample_probability
         return 0.0
