@@ -49,6 +49,40 @@ def test_readme_documents_python_39_and_unified_algorithm():
         assert term in algorithm
 
 
+def test_readme_scopes_unified_core_claims_to_migrated_phase_one_benchmarks():
+    readme = _readme()
+    algorithm = _normalize_whitespace(
+        _section(readme, "Unified PlanU Algorithm")
+    )
+
+    assert not re.search(
+        r"\b(?:all|every)\s+benchmarks?\b",
+        algorithm,
+        flags=re.IGNORECASE,
+    )
+    for term in (
+        "migrated phase-one benchmarks",
+        "Overcooked",
+        "VirtualHome",
+        "BlockWorld",
+        "adapters and configuration",
+    ):
+        assert term in algorithm
+
+    status = _normalize_whitespace(
+        _section(readme, "Unified-core migration status")
+    )
+    for term in (
+        "WebShop",
+        "TravelPlanner",
+        "Phase two",
+        "Planned",
+        "legacy code",
+        "not yet migrated",
+    ):
+        assert term in status
+
+
 def test_readme_links_supported_benchmark_adapters():
     readme = _readme()
 

@@ -11,24 +11,27 @@ for long-horizon decisions in stochastic environments.
 
 ## Unified PlanU Algorithm
 
-The repository has one shared PlanU algorithm implementation in `planu_core`;
-there is no published/canonical split. The shared search follows these steps:
+The migrated phase-one benchmarks (Overcooked, VirtualHome, and BlockWorld) use
+one shared PlanU algorithm implementation in `planu_core`; within this migrated
+scope, there is no published/canonical split. The shared search follows these
+steps:
 
 1. A **State Node** contains **Action Node** children, and each executed action
    leads to an **outcome State Node**. Distinct stochastic outcomes under the
    same Action Node are retained as separate children.
 2. Each action owns a **Quantile Distribution**. Candidate initialization uses
    the action scorer plus an optional preview reward.
-3. Every benchmark uses **Upper Confidence Bounds with Curiosity (UCC)** as the
-   shared selection score: distorted quantile value plus normalized optional
-   RND curiosity, scaled by the configured curiosity weight.
+3. These migrated benchmarks use **Upper Confidence Bounds with Curiosity (UCC)**
+   as the shared selection score: distorted quantile value plus normalized
+   optional RND curiosity, scaled by the configured curiosity weight.
 4. Search keeps a persistent tree across trajectories instead of rebuilding
    the tree after every rollout.
 5. Completed trajectories use a Monte Carlo suffix-return quantile pinball
    backup to update every selected action distribution.
 
-The algorithm and its update rules are benchmark-independent; benchmark
-differences are limited to adapters and configuration.
+For these three migrated phase-one benchmarks, the algorithm and its update
+rules are shared; their benchmark differences are limited to adapters and
+configuration.
 
 ## BlockWorld Migration Notes
 
@@ -61,7 +64,7 @@ broken entrypoint.
   benchmark state, action, preview, and transition APIs while the core remains
   environment-agnostic.
 
-## Benchmark Status
+## Unified-core migration status
 
 | Benchmark | Delivery phase | Status |
 | --- | --- | --- |
@@ -73,7 +76,9 @@ broken entrypoint.
 
 TravelPlanner is tracked from
 [OSU-NLP-Group/TravelPlanner](https://github.com/OSU-NLP-Group/TravelPlanner.git).
-Phase-two adapters are not implemented.
+WebShop and TravelPlanner remain planned for phase two; their unified-core
+adapters are not implemented. The existing `webshop/` legacy code is not yet
+migrated to `planu_core` and does not indicate unified-core support.
 
 ## Installation
 
