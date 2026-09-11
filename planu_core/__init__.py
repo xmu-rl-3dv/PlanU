@@ -9,6 +9,7 @@ from .interfaces import (
     TransitionResult,
 )
 from .nodes import ActionNode, LanguageNode
+from .selection import select_action
 
 __all__ = [
     "ActionCandidate",
@@ -22,4 +23,5 @@ __all__ = [
     "QuantileDistribution",
     "SelectionSchedule",
     "TransitionResult",
+    "select_action",
 ]
