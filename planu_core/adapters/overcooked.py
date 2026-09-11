@@ -769,32 +769,11 @@ def _runtime_at_horizon(
     return False
 
 
-def _correct_delivery_threshold(runtime: Any) -> Optional[float]:
-    for _, current in _runtime_objects(runtime):
-        reward_list = getattr(current, "rewardList", None)
-        if not isinstance(reward_list, Mapping):
-            continue
-        normalized = {
-            str(name).lower().replace("_", " ").strip(): value
-            for name, value in reward_list.items()
-        }
-        if "correct delivery" not in normalized:
-            continue
-        threshold = float(normalized["correct delivery"])
-        step_penalty = float(normalized.get("step penalty", 0.0))
-        return threshold + min(0.0, step_penalty)
-    return None
-
-
 def _successful_horizon_serve(
-    runtime: Any,
     action: ActionCandidate,
     reward: float,
 ) -> bool:
-    if "serve the dish" not in action.text.lower() or reward <= 0.0:
-        return False
-    threshold = _correct_delivery_threshold(runtime)
-    return reward >= threshold if threshold is not None else True
+    return "serve the dish" in action.text.lower() and reward > 0.0
 
 
 def _classify_completion(
@@ -816,7 +795,6 @@ def _classify_completion(
             explicit_success
             if explicit_success is not None
             else done and _successful_horizon_serve(
-                runtime,
                 action,
                 reward,
             )

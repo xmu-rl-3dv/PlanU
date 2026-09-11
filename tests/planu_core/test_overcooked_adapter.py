@@ -20,6 +20,7 @@ from planu_core.adapters.overcooked import (
 )
 from planu_core.interfaces import ActionCandidate, EnvironmentState
 from planu_core.nodes import ActionNode, LanguageNode
+from planu_core.scorers import LEGACY_BASE_MODEL
 from planu_core.search import PlanUSearch
 
 
@@ -867,12 +868,12 @@ def test_overcooked_explicit_runtime_limits_are_truncated(inner_type):
 
 
 @pytest.mark.parametrize("transition_name", ["preview", "step"])
-def test_overcooked_positive_serve_at_v4_horizon_remains_terminal(
+def test_overcooked_discounted_positive_serve_at_v4_horizon_is_terminal(
     transition_name,
 ):
     env = FakeOvercookedHorizonVectorEnv(
         Overcooked_LLMA_V4,
-        reward=1.0,
+        reward=0.98801,
         reward_list={
             "correct delivery": 1.0,
             "step penalty": -0.001,
@@ -897,7 +898,7 @@ def test_overcooked_positive_serve_at_v4_horizon_remains_terminal(
     assert adapter.is_truncated(result.state) is False
 
 
-def test_overcooked_serve_uses_correct_delivery_threshold_when_available():
+def test_overcooked_positive_serve_does_not_require_undiscounted_threshold():
     env = FakeOvercookedHorizonVectorEnv(
         Overcooked_LLMA_V4,
         reward=0.25,
@@ -912,8 +913,8 @@ def test_overcooked_serve_uses_correct_delivery_threshold_when_available():
         np.random.default_rng(2),
     )
 
-    assert result.terminated is False
-    assert result.truncated is True
+    assert result.terminated is True
+    assert result.truncated is False
 
 
 def test_overcooked_positive_serve_falls_back_without_reward_list():
@@ -932,6 +933,47 @@ def test_overcooked_positive_serve_falls_back_without_reward_list():
 
     assert result.terminated is True
     assert result.truncated is False
+
+
+@pytest.mark.parametrize("reward", [0.0, -0.001])
+def test_overcooked_nonpositive_serve_at_horizon_is_truncated(reward):
+    env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=reward,
+        reward_list={"correct delivery": 1.0},
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
+
+
+def test_overcooked_explicit_failure_overrides_positive_horizon_serve():
+    env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=0.98801,
+        info={"is_success": False},
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
 
 
 def test_overcooked_explicit_time_limit_requires_explicit_success_override():
@@ -1338,6 +1380,15 @@ def test_cli_parser_imports_without_gym_and_parses_boolean_strings():
     assert args.rnd is False
     assert args.init_dist is False
     assert args.transpositions is True
+
+
+def test_cli_defaults_to_effective_legacy_model_and_normalization():
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+
+    args = inference.parse_args([])
+
+    assert args.base_model == LEGACY_BASE_MODEL
+    assert args.normalization_mode == "token"
 
 
 def test_cli_temperature_only_configures_action_scorer(monkeypatch):

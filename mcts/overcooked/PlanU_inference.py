@@ -28,6 +28,7 @@ from planu_core.provenance import (
     installed_versions,
     record_run_provenance,
 )
+from planu_core.scorers import LEGACY_BASE_MODEL
 from planu_core.search import PlanUSearch
 
 
@@ -185,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-model",
         action="store",
         type=str,
-        default="meta-llama/Meta-Llama-3-8B-Instruct",
+        default=LEGACY_BASE_MODEL,
     )
     parser.add_argument(
         "--temperature",

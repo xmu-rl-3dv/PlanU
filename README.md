@@ -115,9 +115,14 @@ edit.
 
 ## Run Overcooked
 
-The launcher defaults to CUDA devices `0,1,2,3` and
-`meta-llama/Meta-Llama-3.1-8B-Instruct`. Override `CUDA_VISIBLE_DEVICES`,
-`BASE_MODEL`, or `PYTHON` in the environment when needed.
+The legacy source ignored both the `--base-model` and
+`--normalization-mode` flags. Its effective published settings were
+`Neko-Institute-of-Science/LLaMA-7B-HF` with `token` normalization. The unified
+runner now honors both flags, while the reference launcher pins those effective
+published settings. It defaults to CUDA devices `0,1,2,3`; `BASE_MODEL`,
+`CUDA_VISIBLE_DEVICES`, and `PYTHON` remain available as environment overrides.
+Such overrides are new configurations and should not be compared as an exact
+reproduction of the published Overcooked results.
 
 ```bash
 bash scripts/PlanU_overcooked.sh

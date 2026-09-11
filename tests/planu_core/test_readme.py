@@ -281,7 +281,10 @@ def test_overcooked_script_is_valid_strict_bash_with_configurable_defaults():
     assert syntax_check.returncode == 0, syntax_check.stderr
     assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
     assert "${CUDA_VISIBLE_DEVICES:-0,1,2,3}" in script
-    assert "${BASE_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}" in script
+    assert (
+        "${BASE_MODEL:-Neko-Institute-of-Science/LLaMA-7B-HF}"
+        in script
+    )
     assert "${PYTHON:-python}" in script
     assert 'for seed in 1 10 20 30 40; do' in script
     assert '"${PYTHON}" mcts/overcooked/PlanU_inference.py' in script
@@ -297,7 +300,7 @@ def test_overcooked_script_preserves_experiment_flags():
         "--task 0",
         '--env-id "Overcooked-LLMA-v4"',
         '--record-path "workdir"',
-        '--normalization-mode "word"',
+        '--normalization-mode "token"',
         "--maxiterations 1000",
         "--stochastic 0.5",
         '--base-model "${BASE_MODEL}"',
@@ -307,6 +310,26 @@ def test_overcooked_script_preserves_experiment_flags():
 
     for argument in required_arguments:
         assert argument in script
+
+
+def test_readme_discloses_effective_published_overcooked_settings():
+    overcooked = _normalize_whitespace(
+        _section(_readme(), "Run Overcooked")
+    )
+
+    for term in (
+        "legacy source ignored",
+        "`--base-model`",
+        "`--normalization-mode`",
+        "`Neko-Institute-of-Science/LLaMA-7B-HF`",
+        "`token`",
+        "unified runner now honors",
+        "reference launcher pins",
+        "overrides",
+        "new configurations",
+        "exact reproduction",
+    ):
+        assert term in overcooked
 
 
 def test_readme_referenced_local_paths_exist():
