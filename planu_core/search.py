@@ -1,5 +1,8 @@
+import copy
+import math
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Hashable, List, Optional
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 import numpy as np
 
@@ -23,6 +26,82 @@ class TrajectoryResult:
     state_path: List[LanguageNode]
 
 
+class _MutationJournal:
+    def __init__(self) -> None:
+        self._language_nodes: Dict[
+            int,
+            Tuple[
+                LanguageNode,
+                int,
+                bool,
+                bool,
+                int,
+                Dict[Hashable, ActionNode],
+            ],
+        ] = {}
+        self._action_nodes: Dict[
+            int,
+            Tuple[
+                ActionNode,
+                Dict[Hashable, LanguageNode],
+                List[Tuple[LanguageNode, int, bool, bool]],
+            ],
+        ] = {}
+
+    def snapshot_language(self, node: LanguageNode) -> None:
+        node_id = id(node)
+        if node_id not in self._language_nodes:
+            self._language_nodes[node_id] = (
+                node,
+                node.visit_count,
+                node.terminated,
+                node.truncated,
+                node.outcome_visits,
+                node.children.copy(),
+            )
+
+    def snapshot_action_outcomes(self, node: ActionNode) -> None:
+        node_id = id(node)
+        if node_id not in self._action_nodes:
+            self._action_nodes[node_id] = (
+                node,
+                node.children.copy(),
+                [
+                    (
+                        child,
+                        child.outcome_visits,
+                        child.terminated,
+                        child.truncated,
+                    )
+                    for child in node.children.values()
+                ],
+            )
+
+    def rollback(self) -> None:
+        for (
+            node,
+            visit_count,
+            terminated,
+            truncated,
+            outcome_visits,
+            children,
+        ) in self._language_nodes.values():
+            node.visit_count = visit_count
+            node.terminated = terminated
+            node.truncated = truncated
+            node.outcome_visits = outcome_visits
+            node.children.clear()
+            node.children.update(children)
+
+        for node, children, outcome_states in self._action_nodes.values():
+            node.children.clear()
+            node.children.update(children)
+            for child, outcome_visits, terminated, truncated in outcome_states:
+                child.outcome_visits = outcome_visits
+                child.terminated = terminated
+                child.truncated = truncated
+
+
 class PlanUSearch:
     def __init__(
         self,
@@ -38,7 +117,7 @@ class PlanUSearch:
     def _ensure_root(self, state: EnvironmentState) -> LanguageNode:
         key = self.adapter.state_key(state)
         if self.root is None:
-            self.root = LanguageNode(state.observation, key)
+            self.root = LanguageNode(copy.deepcopy(state.observation), key)
         elif self.root.state_key != key:
             raise ValueError("reset state does not match persistent PlanU root")
         return self.root
@@ -69,16 +148,19 @@ class PlanUSearch:
             raise ValueError("scorer returned the wrong number of action scores")
         if not np.all(np.isfinite(priors)):
             raise ValueError("action scores must be finite")
+        pending_children: Dict[Hashable, ActionNode] = OrderedDict()
+        preview_rng = copy.deepcopy(rng)
         for candidate, prior in zip(candidates, priors):
             preview = self.adapter.preview(
                 self.adapter.clone(state),
                 candidate,
-                rng,
+                copy.deepcopy(preview_rng),
             )
             preview_terminated = (
                 preview.terminated
                 or self.adapter.is_terminal(preview.state)
             )
+            preview_key = self.adapter.state_key(preview.state)
             initial = float(prior)
             if self.config.include_preview_reward:
                 initial += float(preview.reward)
@@ -91,17 +173,18 @@ class PlanUSearch:
                     self.config.value_min,
                     self.config.value_max,
                 ),
-                preview_state=preview.state.observation,
+                preview_state=copy.deepcopy(preview.state.observation),
             )
             if preview.info.get("record_outcome", True):
                 action.get_or_create_outcome(
-                    preview.state.observation,
-                    self.adapter.state_key(preview.state),
+                    copy.deepcopy(preview.state.observation),
+                    preview_key,
                     preview_terminated,
                     preview.truncated,
                     increment_visit=False,
                 )
-            node.children[candidate.key] = action
+            pending_children[candidate.key] = action
+        node.children.update(pending_children)
 
     def run_iteration(
         self,
@@ -109,17 +192,40 @@ class PlanUSearch:
         rng: np.random.Generator,
         reset_seed: Optional[int] = None,
     ) -> TrajectoryResult:
+        root_before = self.root
+        journal = _MutationJournal()
+        try:
+            return self._run_iteration(
+                iteration,
+                rng,
+                reset_seed,
+                journal,
+            )
+        except BaseException:
+            journal.rollback()
+            self.root = root_before
+            raise
+
+    def _run_iteration(
+        self,
+        iteration: int,
+        rng: np.random.Generator,
+        reset_seed: Optional[int],
+        journal: _MutationJournal,
+    ) -> TrajectoryResult:
         state = self.adapter.reset(reset_seed)
         node = self._ensure_root(state)
         if self.adapter.is_terminal(state):
+            journal.snapshot_language(node)
             node.terminated = True
+            final_observation = copy.deepcopy(state.observation)
             backup_trajectory([], [], self.config)
             return TrajectoryResult(
                 actions=[],
                 rewards=[],
                 terminated=True,
                 truncated=False,
-                final_observation=state.observation,
+                final_observation=final_observation,
                 selection_scores=[],
                 action_path=[],
                 state_path=[node],
@@ -134,6 +240,7 @@ class PlanUSearch:
         truncated = False
 
         for _ in range(self.config.max_depth):
+            journal.snapshot_language(node)
             node.visit_count += 1
             self.expand(node, state, rng)
             if not node.children:
@@ -147,24 +254,34 @@ class PlanUSearch:
                 rng,
             )
             result = self.adapter.step(state, action_node.action, rng)
+            try:
+                reward = float(result.reward)
+            except (TypeError, ValueError) as error:
+                raise ValueError("reward must be finite") from error
+            if not math.isfinite(reward):
+                raise ValueError("reward must be finite")
             terminated = result.terminated or self.adapter.is_terminal(
                 result.state
             )
             truncated = result.truncated
             next_key = self.adapter.state_key(result.state)
+            next_observation = copy.deepcopy(result.state.observation)
             existing_outcome = action_node.children.get(next_key)
             outcome_truncated = truncated or (
                 existing_outcome is not None and existing_outcome.truncated
             )
+            journal.snapshot_action_outcomes(action_node)
+            if existing_outcome is not None:
+                journal.snapshot_language(existing_outcome)
             next_node = action_node.get_or_create_outcome(
-                result.state.observation,
+                next_observation,
                 next_key,
                 terminated,
                 outcome_truncated,
             )
             action_path.append(action_node)
             actions.append(action_node.action.key)
-            rewards.append(float(result.reward))
+            rewards.append(reward)
             score_history.append(scores)
             state = result.state
             node = next_node
@@ -172,16 +289,18 @@ class PlanUSearch:
             if terminated or truncated:
                 break
         else:
+            journal.snapshot_language(node)
             node.truncated = True
             truncated = True
 
+        final_observation = copy.deepcopy(state.observation)
         backup_trajectory(action_path, rewards, self.config)
         return TrajectoryResult(
             actions=actions,
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
-            final_observation=state.observation,
+            final_observation=final_observation,
             selection_scores=score_history,
             action_path=action_path,
             state_path=state_path,

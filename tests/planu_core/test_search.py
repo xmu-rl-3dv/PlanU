@@ -1,3 +1,4 @@
+import copy
 from dataclasses import fields
 
 import numpy as np
@@ -105,6 +106,54 @@ class BranchingAdapter(FakeAdapter):
         state.runtime["position"] = action.payload
         state.observation = np.array([action.payload])
         return TransitionResult(state, 0.5, False, False)
+
+
+class FailingSecondPreviewAdapter(BranchingAdapter):
+    def preview(self, state, action, rng):
+        self.preview_calls += 1
+        rng.random()
+        if action.key == "right":
+            raise RuntimeError("second preview failed")
+        return self._move(state, action)
+
+
+class InPlaceObservationAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.preview_observation = None
+
+    def preview(self, state, action, rng):
+        self.preview_calls += 1
+        self._move_in_place(state)
+        self.preview_observation = state.observation
+        return TransitionResult(
+            state,
+            1.0,
+            False,
+            False,
+            {"record_outcome": False},
+        )
+
+    def step(self, state, action, rng):
+        self.actions_taken.append(action.key)
+        self._move_in_place(state)
+        return TransitionResult(state, 1.0, False, False)
+
+    @staticmethod
+    def _move_in_place(state):
+        state.runtime["position"] += 1
+        state.observation[...] = state.runtime["position"]
+
+
+class ConfigurableRewardAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.step_reward = 1.0
+
+    def step(self, state, action, rng):
+        result = super().step(state, action, rng)
+        result.reward = self.step_reward
+        return result
 
 
 class HiddenResetAdapter(FakeAdapter):
@@ -367,6 +416,54 @@ def test_each_preview_uses_an_independent_clone_without_mutating_runtime():
     np.testing.assert_array_equal(state.observation, [0])
 
 
+def test_failed_second_preview_is_atomic_and_does_not_advance_caller_rng():
+    adapter = FailingSecondPreviewAdapter()
+    search = PlanUSearch(adapter, UniformScorer(), PlanUConfig())
+    root = search._ensure_root(adapter.reset())
+    children = root.children
+    children_before = root.children.copy()
+    visit_count_before = root.visit_count
+    rng = np.random.default_rng(19)
+    rng_state_before = copy.deepcopy(rng.bit_generator.state)
+
+    with pytest.raises(RuntimeError, match="second preview failed"):
+        search.run_iteration(0, rng)
+
+    assert root.children is children
+    assert root.children == children_before
+    assert root.visit_count == visit_count_before
+    assert rng.bit_generator.state == rng_state_before
+
+
+def test_tree_and_result_observations_are_independent_snapshots():
+    adapter = InPlaceObservationAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1, value_max=3.0),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(20))
+
+    root = search.root
+    action = root.children["advance"]
+    outcome = action.children[((1,), 1)]
+    np.testing.assert_array_equal(root.state, [0])
+    assert root.state_key == ((0,), 0)
+    np.testing.assert_array_equal(action.preview_state, [1])
+    np.testing.assert_array_equal(outcome.state, [1])
+    assert outcome.state_key == ((1,), 1)
+    np.testing.assert_array_equal(result.final_observation, [1])
+
+    adapter.preview_observation[0] = 7
+    adapter.reset_state.observation[0] = 8
+    result.final_observation[0] = 9
+
+    np.testing.assert_array_equal(root.state, [0])
+    np.testing.assert_array_equal(action.preview_state, [1])
+    np.testing.assert_array_equal(outcome.state, [1])
+
+
 def test_preview_reward_configuration_and_record_outcome_flag():
     with_reward = PlanUSearch(
         FakeAdapter(),
@@ -513,3 +610,106 @@ def test_empty_actions_truncates_unexpanded_state_and_backs_up_empty(
     assert adapter.action_calls == 1
     assert scorer.calls == 0
     assert backup_calls == [([], [])]
+
+
+def test_backup_failure_restores_existing_tree_mutations(monkeypatch):
+    adapter = StochasticAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+    )
+    search.run_iteration(0, np.random.default_rng(21))
+    root = search.root
+    action = root.children["advance"]
+    existing_outcome = action.children[((1,), 1)]
+    root_children = root.children
+    action_children = action.children
+    root_children_before = root.children.copy()
+    action_children_before = action.children.copy()
+    root_state_before = (
+        root.visit_count,
+        root.terminated,
+        root.truncated,
+        root.outcome_visits,
+    )
+    outcome_state_before = (
+        existing_outcome.visit_count,
+        existing_outcome.terminated,
+        existing_outcome.truncated,
+        existing_outcome.outcome_visits,
+    )
+    action_visit_count_before = action.visit_count
+
+    def fail_backup(actions, rewards, config):
+        raise RuntimeError("backup failed")
+
+    monkeypatch.setattr(search_module, "backup_trajectory", fail_backup)
+
+    with pytest.raises(RuntimeError, match="backup failed"):
+        search.run_iteration(1, np.random.default_rng(22))
+
+    assert search.root is root
+    assert root.children is root_children
+    assert action.children is action_children
+    assert root.children == root_children_before
+    assert action.children == action_children_before
+    assert (
+        root.visit_count,
+        root.terminated,
+        root.truncated,
+        root.outcome_visits,
+    ) == root_state_before
+    assert (
+        existing_outcome.visit_count,
+        existing_outcome.terminated,
+        existing_outcome.truncated,
+        existing_outcome.outcome_visits,
+    ) == outcome_state_before
+    assert action.visit_count == action_visit_count_before
+
+
+def test_backup_failure_discards_root_created_by_iteration(monkeypatch):
+    search = PlanUSearch(
+        FakeAdapter(),
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+    )
+
+    def fail_backup(actions, rewards, config):
+        raise RuntimeError("backup failed")
+
+    monkeypatch.setattr(search_module, "backup_trajectory", fail_backup)
+
+    with pytest.raises(RuntimeError, match="backup failed"):
+        search.run_iteration(0, np.random.default_rng(23))
+
+    assert search.root is None
+
+
+@pytest.mark.parametrize("reward", [float("nan"), float("inf")])
+def test_non_finite_actual_reward_fails_before_outcome_mutation(
+    monkeypatch,
+    reward,
+):
+    adapter = ConfigurableRewardAdapter()
+    search = PlanUSearch(adapter, UniformScorer(), PlanUConfig(max_depth=1))
+    state = adapter.reset()
+    root = search._ensure_root(state)
+    search.expand(root, state, np.random.default_rng(24))
+    action = root.children["advance"]
+    outcome = action.children[((1,), 1)]
+    root_visit_count_before = root.visit_count
+    outcome_visits_before = outcome.outcome_visits
+    adapter.step_reward = reward
+
+    def unexpected_backup(actions, rewards, config):
+        pytest.fail("backup must not run for a non-finite reward")
+
+    monkeypatch.setattr(search_module, "backup_trajectory", unexpected_backup)
+
+    with pytest.raises(ValueError, match="reward must be finite"):
+        search.run_iteration(0, np.random.default_rng(25))
+
+    assert root.visit_count == root_visit_count_before
+    assert outcome.outcome_visits == outcome_visits_before
