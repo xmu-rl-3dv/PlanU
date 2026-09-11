@@ -1,8 +1,5 @@
 import argparse
-from dataclasses import asdict
-import hashlib
 from importlib import metadata as importlib_metadata
-import json
 import os
 from pathlib import Path
 import platform
@@ -21,34 +18,25 @@ if _REPOSITORY_ROOT not in sys.path:
 from mcts.overcooked.PlanU_mcts import OvercookedActionScorer
 from planu_core.adapters.overcooked import OvercookedAdapter, overcooked_config
 from planu_core.curiosity import RndCuriosity
+from planu_core.provenance import (
+    PROVENANCE_DISTRIBUTIONS,
+    build_effective_config,
+    build_run_metadata,
+    config_hash,
+    git_commit,
+    installed_versions,
+    record_run_provenance,
+)
 from planu_core.search import PlanUSearch
 
 
-_PROVENANCE_DISTRIBUTIONS = {
-    "numpy": "numpy",
-    "torch": "torch",
-    "gym": "gym",
-    "transformers": "transformers",
-    "peft": "peft",
-    # Keep the import label stable in output; the installed distribution differs.
-    "ding": "DI-engine",
-}
+_PROVENANCE_DISTRIBUTIONS = PROVENANCE_DISTRIBUTIONS
 
 
-def _build_effective_config(args, config):
-    return {
-        "args": dict(vars(args)),
-        "planu_config": asdict(config),
-    }
-
-
-def _config_hash(effective_config) -> str:
-    serialized = json.dumps(
-        effective_config,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+_build_effective_config = build_effective_config
+_config_hash = config_hash
+_installed_versions = installed_versions
+_record_run_provenance = record_run_provenance
 
 
 def _build_run_paths(args, run_name, config_hash):
@@ -66,52 +54,15 @@ def _build_run_paths(args, run_name, config_hash):
 
 
 def _git_commit() -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=_REPOSITORY_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
-    return completed.stdout.strip() or "unknown"
-
-
-def _installed_versions(
-    package_distributions=_PROVENANCE_DISTRIBUTIONS,
-    version_lookup=None,
-):
-    if version_lookup is None:
-        version_lookup = importlib_metadata.version
-    versions = {}
-    for output_key, distribution_name in package_distributions.items():
-        try:
-            versions[output_key] = version_lookup(distribution_name)
-        except importlib_metadata.PackageNotFoundError:
-            versions[output_key] = "not-installed"
-    return versions
+    return git_commit(_REPOSITORY_ROOT)
 
 
 def _build_run_metadata():
-    return {
-        "git_commit": _git_commit(),
-        "python_version": platform.python_version(),
-        "packages": _installed_versions(_PROVENANCE_DISTRIBUTIONS),
-    }
-
-
-def _record_run_provenance(writer, effective_config, run_metadata) -> None:
-    writer.add_text(
-        "planu/effective_config",
-        json.dumps(effective_config, sort_keys=True),
-        global_step=0,
-    )
-    writer.add_text(
-        "planu/run_metadata",
-        json.dumps(run_metadata, sort_keys=True),
-        global_step=0,
+    return build_run_metadata(
+        repository_root=_REPOSITORY_ROOT,
+        package_distributions=_PROVENANCE_DISTRIBUTIONS,
+        git_commit_fn=_git_commit,
+        installed_versions_fn=_installed_versions,
     )
 
 

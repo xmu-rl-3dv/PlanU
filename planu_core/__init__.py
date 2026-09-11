@@ -1,3 +1,9 @@
+from .adapters.virtualhome import (
+    VirtualHomeAdapter,
+    VirtualHomeTask,
+    describe_virtualhome_observation,
+    virtualhome_config,
+)
 from .backup import backup_trajectory, suffix_returns
 from .config import PlanUConfig, SelectionSchedule
 from .curiosity import NullCuriosity, RndCuriosity
@@ -11,6 +17,7 @@ from .interfaces import (
     TransitionResult,
 )
 from .nodes import ActionNode, LanguageNode
+from .scorers import ConstantActionScorer, HuggingFaceActionScorer
 from .search import PlanUSearch, TrajectoryResult
 from .selection import select_action
 
@@ -18,9 +25,11 @@ __all__ = [
     "ActionCandidate",
     "ActionNode",
     "ActionScorer",
+    "ConstantActionScorer",
     "CuriosityProvider",
     "EnvironmentAdapter",
     "EnvironmentState",
+    "HuggingFaceActionScorer",
     "LanguageNode",
     "NullCuriosity",
     "PlanUConfig",
@@ -30,7 +39,11 @@ __all__ = [
     "SelectionSchedule",
     "TrajectoryResult",
     "TransitionResult",
+    "VirtualHomeAdapter",
+    "VirtualHomeTask",
     "backup_trajectory",
+    "describe_virtualhome_observation",
     "select_action",
     "suffix_returns",
+    "virtualhome_config",
 ]

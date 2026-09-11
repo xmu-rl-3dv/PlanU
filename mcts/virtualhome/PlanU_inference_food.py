@@ -1,196 +1,329 @@
-import os
-import sys
-import pathlib
-
-root = str(pathlib.Path(__file__).parents[2])
-sys.path.append(root)
-
 import argparse
-import os
-import random
-import time
-from distutils.util import strtobool
-import copy
-import gym
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.distributions.categorical import Categorical
-from torch.utils.tensorboard import SummaryWriter
-import virtual_home
-from mcts.virtualhome.PlanU_v1 import LLMAgent, LanguageNode, ActionNode
-from datetime import datetime
 import logging
-import json
-from torch.utils.tensorboard import SummaryWriter
-from rnd import RndRewardModel
-log_dir = 'log/food_preparation/mcts+'
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
+import os
+from pathlib import Path
+import random
+import sys
+import time
+from typing import Optional, Sequence
 
-now = datetime.now()
-time_str = now.strftime('%Y%m%d_%H%M%S')
-# run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{time_str}"
-# if args.track:
-#     import wandb
-
-#     wandb.init(
-#         project=args.wandb_project_name,
-#         entity=args.wandb_entity,
-#         sync_tensorboard=True,
-#         config=vars(args),
-#         name=run_name,
-#         monitor_gym=True,
-#         save_code=True,
-#     )
-# writer = SummaryWriter(f"{args.record_path}/{run_name}")
+import numpy as np
 
 
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 
-def make_env(env_id, seed, idx, capture_video, run_name, env_params):
+from planu_core.adapters.virtualhome import (
+    VirtualHomeAdapter,
+    VirtualHomeTask,
+    virtualhome_config,
+)
+from planu_core.curiosity import RndCuriosity
+from planu_core.provenance import (
+    build_effective_config,
+    build_run_metadata,
+    config_hash,
+    record_run_provenance,
+)
+from planu_core.scorers import ConstantActionScorer
+from planu_core.search import PlanUSearch
+
+
+_build_effective_config = build_effective_config
+_config_hash = config_hash
+_record_run_provenance = record_run_provenance
+
+
+def _parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = value.lower()
+    if normalized in {"y", "yes", "t", "true", "on", "1"}:
+        return True
+    if normalized in {"n", "no", "f", "false", "off", "0"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid truth value: {value!r}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stochastic", type=float, default=0.2)
+    parser.add_argument("--valueweight", type=float, default=0.5)
+    parser.add_argument("--maxiterations", type=int, default=1000)
+    parser.add_argument("--depth", type=int, default=15)
+    parser.add_argument(
+        "--transpositions",
+        type=_parse_bool,
+        default=False,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--rnd",
+        type=_parse_bool,
+        default=False,
+        nargs="?",
+        const=True,
+    )
+    parser.add_argument(
+        "--base-model",
+        type=str,
+        default="meta-llama/Meta-Llama-3-8B-Instruct",
+    )
+    parser.add_argument("--seed", type=int, default=100)
+    parser.add_argument("--num-envs", type=int, default=1)
+    return parser
+
+
+def parse_args(argv: Optional[Sequence[str]] = None):
+    return build_parser().parse_args(argv)
+
+
+def validate_args(args) -> None:
+    assert args.num_envs == 1, "num_envs must be exactly 1"
+
+
+def make_env(
+    env_id,
+    seed,
+    idx,
+    capture_video,
+    run_name,
+    env_params,
+):
     def thunk():
+        import gym
 
         env = gym.make(env_id, **env_params)
-        if capture_video:
-            if idx == 0:
-                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        if capture_video and idx == 0:
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         return env
 
     return thunk
 
-def main():
 
-    device = torch.device("cuda")
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--stochastic', type=float,default=0.2,action= "store",help='stochatic')
-    parser.add_argument('--valueweight', type=float, default=0.5, action= "store",help='value_weight')
-    parser.add_argument('--maxiterations', type=int, default=1000,action= "store", help='max_iteration')
-    parser.add_argument('--transpositions', action='store',type = bool,default = False, help = 'if use transopositions')
-    parser.add_argument('--rnd', action='store',type = bool,default = False, help = 'if use rnd')
-    parser.add_argument('--base-model',     action='store',        type=str,             default="meta-llama/Meta-Llama-3-8B-Instruct",               help='''select a base model from below:"meta-llama/Meta-Llama-3-8B-Instruct",
-                    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-                    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"''')
-    parser.add_argument('--seed', type=int, default=100,action= "store", help='random seed')  
-    args= parser.parse_args()
-
-    log_file = os.path.join(log_dir, f'stochastc={args.stochastic}_vw={args.valueweight}_{time_str}.txt')
-    logging.basicConfig(filename=log_file, level=logging.INFO, 
-                        format='%(asctime)s - %(message)s')
-
-    seed = args.seed
-    env_params = {
-        'seed': seed,
-        'debug': False,
+def rnd_settings(task: VirtualHomeTask):
+    return {
+        "type": "rnd",
+        "intrinsic_reward_type": "assign",
+        "learning_rate": 1e-5,
+        "batch_size": 15,
+        "obs_shape": task.obs_shape,
+        "hidden_size_list": [64, 64, 128],
+        "update_per_collect": 20,
+        "obs_norm": True,
+        "obs_norm_clamp_min": -1,
+        "obs_norm_clamp_max": 1,
+        "intrinsic_reward_weight": 0.01,
+        "extrinsic_reward_norm": True,
+        "extrinsic_reward_norm_max": 1,
     }
-    rnd_writer = SummaryWriter(f"./rnd_results/Model={args.base_model}/food/PlanU_nollm/seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}")
-    writer = SummaryWriter(f"./results/Model={args.base_model}/food/PlanU_nollm/seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+
+
+def _build_curiosity(task, device, writer):
+    from easydict import EasyDict
+
+    from mcts.virtualhome.rnd import RndRewardModel
+
+    model = RndRewardModel(
+        EasyDict(rnd_settings(task)),
+        device=str(device),
+        tb_logger=writer,
     )
-    print("play virtual home v1")
+    return RndCuriosity(model, minimum_samples=15)
 
-    envs = gym.vector.SyncVectorEnv(
-        [make_env("VirtualHome-v1", seed, 0, False, "tmp", env_params) for i in
-         range(1)]
+
+def build_planu_components(args, envs, device, rnd_writer, config=None):
+    task = VirtualHomeTask.FOOD
+    scorer = ConstantActionScorer(1.0)
+    adapter = VirtualHomeAdapter(
+        envs,
+        task=task,
+        stochastic_probability=args.stochastic,
+        rng=np.random.default_rng(args.seed),
+    )
+    if config is None:
+        config = virtualhome_config(
+            task,
+            rnd=args.rnd,
+            max_iterations=args.maxiterations,
+            max_depth=args.depth,
+        )
+    curiosity = (
+        _build_curiosity(task, device, rnd_writer) if args.rnd else None
+    )
+    return PlanUSearch(adapter, scorer, config, curiosity), scorer, config
+
+
+def discounted_return(rewards, discount: float = 0.99) -> float:
+    return float(
+        sum(float(reward) * discount ** index for index, reward in enumerate(rewards))
     )
 
-    print("play virtual home v1")
-    # load_path = os.path.join(root, "checkpoints", "food_preparation", "lora")
+
+def is_success(episodic_return: float) -> bool:
+    return episodic_return > 0.0
 
 
-
-    agent = LLMAgent(normalization_mode="word", rnd = args.rnd,tb_logger=rnd_writer,base_model = args.base_model
-                     )
-
-    success_rate = 0
-    traj = []
-    traj_rewards = []
-    rewards_list = []
-    step_list = []
-    obs = envs.reset()
-    root = LanguageNode(state=obs,initial_value=torch.tensor([1]))
-    _ = agent.expand(obs,root,envs)
-    for i in range(args.maxiterations):  #100
-        logging.info(f"New round : {i} -----------------------------------------------------------------------------------------------------\n")
-        steps = 0
-        done = False
-        rewards = 0
-        reward_list = []
-        reward_list = torch.tensor(reward_list,device=device)
-        discount = 1
-        # root._visit_count +=1
-        node = root
-        node_path = []
-        obs = envs.reset()
-        action_list = []
-        stoc =True
-        train_data_cnt = 0
-        while not done and steps < 15:
-            assert(type(node)==LanguageNode)
-            node._visit_count += 1
-            if node.is_leaf():
-                agent.expand(obs, node,envs,False,value_weight= args.valueweight)
-            steps += 1
-
-            obs_temp = obs
-            envs_temp = copy.deepcopy(envs)
-            done_temp = done    
-
-            action, value, next_node, action_name = agent.select(obs, node)
-            node_path.append(next_node)
-            action = action.cpu().numpy()
-            action_list.append(action_name)
-            print("action", action, 'action name', action_name)
+def _build_run_paths(args, config_digest):
+    result_path = (
+        f"./results/Model={args.base_model}/food/PlanU_nollm/"
+        f"seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}/"
+        f"config={config_digest}"
+    )
+    rnd_path = (
+        f"./rnd_results/Model={args.base_model}/food/PlanU_nollm/"
+        f"seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}/"
+        f"config={config_digest}"
+    )
+    return result_path, rnd_path
 
 
-            obs, reward, done, info = envs.step(action)
-            if reward <= 0:
-                reward = np.array([-0.001])
-            if stoc and 'open' in action_name and random.random()<args.stochastic: # state transfer uncertainty. Stochastic situation
-                obs = obs_temp
-                envs = envs_temp
-                reward = np.array([-0.001])
-                done = done_temp
-                # stoc = False
-            
-            logging.info(f"action : {action_name}  reward : {reward}")
-            if args.rnd:
-                agent.collect_data(obs)
-            rewards += reward * discount
-            reward_list=torch.cat((reward_list, torch.tensor(reward, device=device)))
-            next_node = agent.expand(obs,next_node,envs, type(next_node) == ActionNode,value_weight = args.valueweight)
-            discount *= 0.99
-            node = next_node
-        agent.mcts_update(node_path, reward_list)
-        step_list.append(steps)
-        if rewards > 0:
-            success_rate += 1
-        if args.rnd and train_data_cnt > 15:
-            agent.train()
-    
-        print(i, steps, rewards)
-        logging.info(f"steps : {steps}, rewards : {rewards}")
-        writer.add_scalar("charts/episodic_return", rewards, i)
-        writer.add_scalar("charts/episodic_length", steps, i)
-    writer.add_text("scalrs/consumed_tokens",str(agent.total_llm_tokenizer_token),global_step = 0)
-    writer.add_text("scalrs/query_times",str(agent.total_llm_tokenizer_call),global_step = 0)
-    with open("token_consumed.txt", "a") as f:
-        f.write("--------------------------------------\n")
-        f.write(f"./results_new/Model={args.base_model}/fp/PlanU/seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}")
-        f.write(f"consumed_tokens={agent.total_llm_tokenizer_token}\n")
-        f.write(f"query_times={agent.total_llm_tokenizer_call}\n")
-        f.write("--------------------------------------\n")
-    # print(np.mean(reward_list), np.std(reward_list))
-    # print(np.mean(step_list), np.std(step_list))
-    # print(success_rate)
-    # logging.info(f"mean reward : {np.mean(reward_list)}, std reward : {np.std(reward_list)}")
-    # logging.info(f"mean step : {np.mean(step_list)}, std step : {np.std(step_list)}")
-    # logging.info(f"success rate : {success_rate}\n")
+def _token_log_path(args, config_digest):
+    return (
+        f"./results_new/Model={args.base_model}/fp/PlanU/"
+        f"seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}/"
+        f"config={config_digest}"
+    )
 
 
-if __name__ == '__main__':
+def run(args) -> None:
+    validate_args(args)
+    task = VirtualHomeTask.FOOD
+    config = virtualhome_config(
+        task,
+        rnd=args.rnd,
+        max_iterations=args.maxiterations,
+        max_depth=args.depth,
+    )
+    effective_config = _build_effective_config(args, config)
+    config_digest = _config_hash(effective_config)
+    run_metadata = build_run_metadata(_REPOSITORY_ROOT)
+
+    import gym
+    import torch
+    from torch.utils.tensorboard import SummaryWriter
+    import virtual_home  # noqa: F401
+
+    result_path, rnd_path = _build_run_paths(args, config_digest)
+    writer = SummaryWriter(result_path)
+    rnd_writer = SummaryWriter(rnd_path)
+    envs = None
+    scorer = None
+    try:
+        _record_run_provenance(writer, effective_config, run_metadata)
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s"
+            % "\n".join(
+                f"|{key}|{value}|" for key, value in vars(args).items()
+            ),
+        )
+
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        env_params = {"seed": args.seed, "debug": False}
+        envs = gym.vector.SyncVectorEnv(
+            [
+                make_env(
+                    task.env_id,
+                    args.seed,
+                    index,
+                    False,
+                    "tmp",
+                    env_params,
+                )
+                for index in range(args.num_envs)
+            ]
+        )
+
+        search, scorer, config = build_planu_components(
+            args,
+            envs,
+            device,
+            rnd_writer,
+            config,
+        )
+        log_dir = "log/food_preparation/mcts+"
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        logging.basicConfig(
+            filename=os.path.join(
+                log_dir,
+                f"stochastc={args.stochastic}_vw={args.valueweight}_"
+                f"{timestamp}.txt",
+            ),
+            level=logging.INFO,
+            format="%(asctime)s - %(message)s",
+        )
+
+        print("play virtual home v1")
+        num_success = 0
+        for iteration in range(args.maxiterations):
+            result = search.run_iteration(
+                iteration,
+                np.random.default_rng(args.seed + iteration),
+            )
+            episodic_return = discounted_return(result.rewards)
+            episodic_length = len(result.rewards)
+            if is_success(episodic_return):
+                num_success += 1
+            print(iteration, episodic_length, episodic_return)
+            logging.info(
+                "steps : %s, rewards : %s",
+                episodic_length,
+                episodic_return,
+            )
+            writer.add_scalar(
+                "charts/episodic_return",
+                episodic_return,
+                iteration,
+            )
+            writer.add_scalar(
+                "charts/episodic_length",
+                episodic_length,
+                iteration,
+            )
+
+        consumed_tokens = getattr(scorer, "total_llm_tokenizer_token", 0)
+        query_times = getattr(scorer, "total_llm_tokenizer_call", 0)
+        writer.add_text(
+            "scalrs/num_success",
+            str(num_success),
+            global_step=0,
+        )
+        writer.add_text(
+            "scalrs/consumed_tokens",
+            str(consumed_tokens),
+            global_step=0,
+        )
+        writer.add_text(
+            "scalrs/query_times",
+            str(query_times),
+            global_step=0,
+        )
+        with open("token_consumed.txt", "a") as token_log:
+            token_log.write("--------------------------------------\n")
+            token_log.write(f"{_token_log_path(args, config_digest)}\n")
+            token_log.write(f"consumed_tokens={consumed_tokens}\n")
+            token_log.write(f"query_times={query_times}\n")
+            token_log.write("--------------------------------------\n")
+    finally:
+        if envs is not None:
+            envs.close()
+        writer.close()
+        rnd_writer.close()
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    run(parse_args(argv))
+
+
+if __name__ == "__main__":
     main()
-
