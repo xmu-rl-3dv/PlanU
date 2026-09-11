@@ -31,7 +31,6 @@ class ActionNode:
         self,
         state: Any,
         state_key: Hashable,
-        reward: float,
         terminated: bool,
         truncated: bool,
         increment_visit: bool = True,
@@ -46,6 +45,10 @@ class ActionNode:
                 truncated=truncated,
             )
             self.children[state_key] = child
+        elif child.terminated != terminated or child.truncated != truncated:
+            raise ValueError(
+                "inconsistent terminated/truncated flags for existing outcome"
+            )
         if increment_visit:
             child.outcome_visits += 1
         return child

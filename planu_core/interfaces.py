@@ -1,13 +1,27 @@
 from dataclasses import dataclass, field
-from typing import Any, Hashable, Mapping, Protocol, Sequence
+from types import MappingProxyType
+from typing import Any, Hashable, Mapping, Optional, Protocol, Sequence
+
+import numpy as np
 
 
 @dataclass(frozen=True)
 class ActionCandidate:
     key: Hashable
-    payload: Any
-    text: str
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    payload: Any = field(compare=False, hash=False)
+    text: str = field(compare=False, hash=False)
+    metadata: Mapping[str, Any] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "metadata",
+            MappingProxyType(dict(self.metadata)),
+        )
 
 
 @dataclass
@@ -26,7 +40,10 @@ class TransitionResult:
 
 
 class EnvironmentAdapter(Protocol):
-    def reset(self) -> EnvironmentState:
+    def reset(self, seed: Optional[int] = None) -> EnvironmentState:
+        ...
+
+    def clone(self, state: EnvironmentState) -> EnvironmentState:
         ...
 
     def actions(
@@ -40,6 +57,7 @@ class EnvironmentAdapter(Protocol):
         self,
         state: EnvironmentState,
         action: ActionCandidate,
+        rng: np.random.Generator,
     ) -> TransitionResult:
         ...
 
@@ -47,10 +65,14 @@ class EnvironmentAdapter(Protocol):
         self,
         state: EnvironmentState,
         action: ActionCandidate,
+        rng: np.random.Generator,
     ) -> TransitionResult:
         ...
 
-    def state_key(self, observation: Any) -> Hashable:
+    def state_key(self, state: EnvironmentState) -> Hashable:
+        ...
+
+    def is_terminal(self, state: EnvironmentState) -> bool:
         ...
 
 
@@ -59,7 +81,7 @@ class ActionScorer(Protocol):
         self,
         observation: Any,
         actions: Sequence[ActionCandidate],
-    ):
+    ) -> Sequence[float]:
         ...
 
 
@@ -70,5 +92,5 @@ class CuriosityProvider(Protocol):
     def observe(self, observation: Any) -> None:
         ...
 
-    def train(self) -> None:
+    def train(self) -> Optional[Mapping[str, float]]:
         ...
