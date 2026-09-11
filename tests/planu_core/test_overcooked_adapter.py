@@ -959,6 +959,7 @@ def test_cli_temperature_only_configures_action_scorer(monkeypatch):
         def __init__(self, *args, **kwargs):
             calls["scorer_temperature"] = kwargs["temperature"]
             calls["scorer_device"] = kwargs["device"]
+            calls["scorer_kwargs"] = kwargs
 
     class RecordingAdapter:
         def __init__(self, *args, **kwargs):
@@ -986,6 +987,7 @@ def test_cli_temperature_only_configures_action_scorer(monkeypatch):
 
     assert calls["scorer_temperature"] == 0.37
     assert calls["scorer_device"] == "cpu"
+    assert "torch_dtype" not in calls["scorer_kwargs"]
     assert "temperature" not in calls["config_kwargs"]
     assert config.selection_temperature == 1.0
 

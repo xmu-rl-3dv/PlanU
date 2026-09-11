@@ -136,7 +136,7 @@ def _build_curiosity(task, device, writer):
 
 def build_planu_components(args, envs, device, rnd_writer, config=None):
     task = VirtualHomeTask.FOOD
-    scorer = ConstantActionScorer(1.0)
+    scorer = ConstantActionScorer(0.0)
     adapter = VirtualHomeAdapter(
         envs,
         task=task,
@@ -160,6 +160,15 @@ def discounted_return(rewards, discount: float = 0.99) -> float:
     return float(
         sum(float(reward) * discount ** index for index, reward in enumerate(rewards))
     )
+
+
+def _log_trajectory_steps(result) -> None:
+    for action_node, reward in zip(result.action_path, result.rewards):
+        logging.info(
+            "action : %s  reward : %s",
+            action_node.action.text,
+            reward,
+        )
 
 
 def is_success(episodic_return: float) -> bool:
@@ -270,6 +279,7 @@ def run(args) -> None:
                 iteration,
                 np.random.default_rng(args.seed + iteration),
             )
+            _log_trajectory_steps(result)
             episodic_return = discounted_return(result.rewards)
             episodic_length = len(result.rewards)
             if is_success(episodic_return):

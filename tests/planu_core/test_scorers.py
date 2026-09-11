@@ -1,10 +1,77 @@
 import importlib
 import math
+import sys
+import types
 
 import numpy as np
 import pytest
 
 from planu_core.interfaces import ActionCandidate
+
+
+@pytest.mark.parametrize("torch_dtype", [None, object()])
+def test_huggingface_scorer_forwards_only_configured_torch_dtype(
+    monkeypatch,
+    torch_dtype,
+):
+    model_calls = []
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(base_model):
+            return types.SimpleNamespace(base_model=base_model)
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(base_model, **kwargs):
+            model_calls.append((base_model, kwargs))
+            return object()
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    fake_transformers = types.SimpleNamespace(
+        AutoModelForCausalLM=FakeAutoModel,
+        AutoTokenizer=FakeAutoTokenizer,
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    from planu_core.scorers import HuggingFaceActionScorer
+
+    scorer = HuggingFaceActionScorer(
+        "fake/model",
+        device="cpu",
+        torch_dtype=torch_dtype,
+    )
+
+    expected_kwargs = {"device_map": {"": "cpu"}}
+    if torch_dtype is not None:
+        expected_kwargs["torch_dtype"] = torch_dtype
+    assert model_calls == [("fake/model", expected_kwargs)]
+    assert scorer.torch_dtype is torch_dtype
+
+
+def test_huggingface_scorer_keeps_injected_dependencies_lazy(monkeypatch):
+    tokenizer = object()
+    model = object()
+    torch_dtype = object()
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    from planu_core.scorers import HuggingFaceActionScorer
+
+    scorer = HuggingFaceActionScorer(
+        "fake/model",
+        tokenizer=tokenizer,
+        model=model,
+        device="cpu",
+        torch_dtype=torch_dtype,
+    )
+
+    assert scorer.tokenizer is tokenizer
+    assert scorer.model is model
+    assert scorer.torch_dtype is torch_dtype
 
 
 def test_shared_scorer_module_imports_without_optional_ml_dependencies():

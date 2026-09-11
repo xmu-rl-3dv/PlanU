@@ -4,7 +4,9 @@ import hashlib
 import importlib
 import itertools
 import json
+import logging
 from pathlib import Path
+import sys
 import types
 
 import numpy as np
@@ -572,7 +574,7 @@ def test_shared_search_smoke_and_terminal_marker_reset(task, observation):
     assert env.reset_calls == [None, None]
 
 
-def test_food_constant_scorer_initializes_one_plus_preview_reward():
+def test_food_zero_scorer_initializes_from_preview_reward_only():
     env = FakeVectorEnv(FOOD_INITIAL, reward=0.25, done=True)
     adapter = VirtualHomeAdapter(
         env,
@@ -582,7 +584,7 @@ def test_food_constant_scorer_initializes_one_plus_preview_reward():
     )
     search = PlanUSearch(
         adapter,
-        ConstantActionScorer(1.0),
+        ConstantActionScorer(0.0),
         virtualhome_config(
             VirtualHomeTask.FOOD,
             False,
@@ -600,7 +602,7 @@ def test_food_constant_scorer_initializes_one_plus_preview_reward():
         for action in root.children.values()
     }
     assert len(values) == 1
-    assert values.pop() == pytest.approx(1.25)
+    assert values.pop() == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(
@@ -745,7 +747,57 @@ def test_runners_report_legacy_discounted_return(
     assert runner.discounted_return(rewards) == pytest.approx(expected)
 
 
-def test_food_runner_uses_constant_scorer_and_shared_provenance():
+def test_food_runner_logs_raw_step_rewards_in_action_order(caplog):
+    runner = importlib.import_module(
+        "mcts.virtualhome.PlanU_inference_food"
+    )
+    result = types.SimpleNamespace(
+        action_path=[
+            types.SimpleNamespace(
+                action=types.SimpleNamespace(text="open the microwave")
+            ),
+            types.SimpleNamespace(
+                action=types.SimpleNamespace(text="grab the pancake")
+            ),
+        ],
+        rewards=[1.0, 2.0],
+    )
+    caplog.set_level(logging.INFO)
+
+    runner._log_trajectory_steps(result)
+
+    assert caplog.messages == [
+        "action : open the microwave  reward : 1.0",
+        "action : grab the pancake  reward : 2.0",
+    ]
+
+
+def test_entertainment_runner_logs_discounted_step_rewards_in_action_order(
+    caplog,
+):
+    runner = importlib.import_module("mcts.virtualhome.PlanU_entertainment")
+    result = types.SimpleNamespace(
+        action_path=[
+            types.SimpleNamespace(
+                action=types.SimpleNamespace(text="grab the chips")
+            ),
+            types.SimpleNamespace(
+                action=types.SimpleNamespace(text="walk to the sofa")
+            ),
+        ],
+        rewards=[1.0, 2.0],
+    )
+    caplog.set_level(logging.INFO)
+
+    runner._log_trajectory_steps(result)
+
+    assert caplog.messages == [
+        "action : grab the chips  reward : 1.0",
+        "action : walk to the sofa  reward : 1.98",
+    ]
+
+
+def test_food_runner_uses_zero_constant_scorer_and_shared_provenance():
     runner = importlib.import_module(
         "mcts.virtualhome.PlanU_inference_food"
     )
@@ -760,7 +812,7 @@ def test_food_runner_uses_constant_scorer_and_shared_provenance():
 
     assert isinstance(search, PlanUSearch)
     assert isinstance(scorer, ConstantActionScorer)
-    assert scorer.value == 1.0
+    assert scorer.value == 0.0
     assert config.max_iterations == 3
     assert config.max_depth == 2
     assert runner._build_effective_config is build_effective_config
@@ -796,6 +848,35 @@ def test_entertainment_runner_passes_cli_temperature_to_shared_scorer(
     assert config.max_iterations == 3
     assert config.max_depth == 2
     assert runner._build_effective_config is build_effective_config
+
+
+def test_entertainment_runner_uses_fp16_only_for_cuda(monkeypatch):
+    runner = importlib.import_module("mcts.virtualhome.PlanU_entertainment")
+    args = runner.parse_args(["--maxiterations", "1", "--depth", "1"])
+    float16 = object()
+    calls = []
+
+    class RecordingScorer:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(runner, "HuggingFaceActionScorer", RecordingScorer)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(float16=float16),
+    )
+
+    for device in ("cpu", "cuda"):
+        runner.build_planu_components(
+            args,
+            envs=FakeVectorEnv(ENTERTAINMENT_INITIAL),
+            device=device,
+            rnd_writer=object(),
+        )
+
+    assert [call["torch_dtype"] for call in calls] == [None, float16]
+    assert [call["device"] for call in calls] == ["cpu", "cuda"]
 
 
 @pytest.mark.parametrize(

@@ -137,11 +137,17 @@ def _build_curiosity(task, device, writer):
 
 def build_planu_components(args, envs, device, rnd_writer, config=None):
     task = VirtualHomeTask.ENTERTAINMENT
+    torch_dtype = None
+    if str(device).startswith("cuda"):
+        import torch
+
+        torch_dtype = torch.float16
     scorer = HuggingFaceActionScorer(
         args.base_model,
         normalization_mode="token",
         temperature=args.temperature,
         device=str(device),
+        torch_dtype=torch_dtype,
     )
     adapter = VirtualHomeAdapter(
         envs,
@@ -166,6 +172,17 @@ def discounted_return(rewards, discount: float = 0.99) -> float:
     return float(
         sum(float(reward) * discount ** index for index, reward in enumerate(rewards))
     )
+
+
+def _log_trajectory_steps(result) -> None:
+    for step, (action_node, reward) in enumerate(
+        zip(result.action_path, result.rewards)
+    ):
+        logging.info(
+            "action : %s  reward : %s",
+            action_node.action.text,
+            float(reward) * 0.99 ** step,
+        )
 
 
 def is_success(episodic_return: float) -> bool:
@@ -277,6 +294,7 @@ def run(args) -> None:
                 iteration,
                 np.random.default_rng(args.seed + iteration),
             )
+            _log_trajectory_steps(result)
             episodic_return = discounted_return(result.rewards)
             episodic_length = len(result.rewards)
             if is_success(episodic_return):

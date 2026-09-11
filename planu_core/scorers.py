@@ -68,6 +68,7 @@ class HuggingFaceActionScorer:
         tokenizer: Any = None,
         model: Any = None,
         device: Optional[str] = None,
+        torch_dtype: Any = None,
     ) -> None:
         if normalization_mode not in _NORMALIZATION_MODES:
             raise ValueError("normalization_mode must be token, word, or sum")
@@ -80,6 +81,7 @@ class HuggingFaceActionScorer:
         self.normalization_mode = normalization_mode
         self.temperature = float(temperature)
         self.device = device
+        self.torch_dtype = torch_dtype
         self.total_llm_tokenizer_token = 0
         self.total_llm_tokenizer_call = 0
 
@@ -93,9 +95,14 @@ class HuggingFaceActionScorer:
                 tokenizer = AutoTokenizer.from_pretrained(self.base_model)
                 tokenizer.pad_token_id = 0
             if model is None:
+                model_kwargs = {
+                    "device_map": _device_map_for(self.device),
+                }
+                if self.torch_dtype is not None:
+                    model_kwargs["torch_dtype"] = self.torch_dtype
                 model = AutoModelForCausalLM.from_pretrained(
                     self.base_model,
-                    device_map=_device_map_for(self.device),
+                    **model_kwargs,
                 )
 
         self.tokenizer = tokenizer
