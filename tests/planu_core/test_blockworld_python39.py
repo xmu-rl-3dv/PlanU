@@ -52,10 +52,10 @@ def test_tracked_blockworld_annotations_are_python39_runtime_safe():
     assert unsafe == []
 
 
-def test_blockworld_package_declares_python39_support():
+def test_repository_package_declares_python39_support():
     tree = ast.parse(
-        (BLOCKWORLD_ROOT / "setup.py").read_text(),
-        filename="blockworld/setup.py",
+        (REPO_ROOT / "setup.py").read_text(),
+        filename="setup.py",
     )
     setup_call = next(
         node

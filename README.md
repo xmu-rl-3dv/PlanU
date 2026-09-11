@@ -23,6 +23,20 @@ cd PlanU
 pip install -r requirements.txt
 ```
 
+The Python distribution contains both the BlockWorld `reasoners` package and
+the repository's shared `planu_core` implementation. Install it from the
+repository root or through the compatible BlockWorld entry point:
+
+```bash
+python -m pip install -e .
+python -m pip install -e blockworld
+```
+
+BlockWorld datasets, prompts, PDDL files, and planner binaries under
+`blockworld/examples` are external benchmark data and are not included in the
+Python distribution. Experiment entry points receive paths to these resources
+explicitly.
+
 ### 📂 Overcooked & VirtualHome
 
 1. Set **local LLM path** in  
