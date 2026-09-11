@@ -36,6 +36,10 @@ class QuantileDistribution:
             raise ValueError("fractions and values must have the same length")
         if not np.all(np.isfinite(fractions)) or not np.all(np.isfinite(values)):
             raise ValueError("fractions and values must be finite")
+        if np.any((fractions <= 0.0) | (fractions >= 1.0)):
+            raise ValueError("fractions must be strictly between 0 and 1")
+        if np.any(np.diff(fractions) <= 0.0):
+            raise ValueError("fractions must be strictly increasing")
 
         self.fractions = fractions.copy()
         self.values = values.copy()
@@ -89,6 +93,9 @@ class QuantileDistribution:
         if np.any(probability_array < 0.0):
             raise ValueError("probabilities must be nonnegative")
 
+        order = np.argsort(level_array)
+        level_array = level_array[order]
+        probability_array = probability_array[order]
         probability_scale = float(np.max(probability_array))
         if probability_scale <= 0.0:
             raise ValueError("probabilities must have nonzero mass")
@@ -116,7 +123,9 @@ class QuantileDistribution:
             mask = self.fractions <= -risk_distortion
         selected = self.values[mask]
         if selected.size == 0:
-            selected = self.values
+            if risk_distortion > 0.0:
+                return float(np.max(self.values))
+            return float(np.min(self.values))
         return float(np.mean(selected))
 
     def update_scalar(self, target: float, learning_rate: float) -> None:

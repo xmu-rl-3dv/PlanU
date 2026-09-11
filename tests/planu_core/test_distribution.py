@@ -54,6 +54,18 @@ def test_categorical_initialization_normalizes_probability_mass():
     np.testing.assert_allclose(dist.values, [-1.0, 1.0, 1.0, 1.0])
 
 
+def test_categorical_initialization_sorts_levels_with_their_probabilities():
+    dist = QuantileDistribution.from_categorical(
+        levels=[1.0, -1.0],
+        probabilities=[0.75, 0.25],
+        count=4,
+        value_min=-1.0,
+        value_max=1.0,
+    )
+
+    np.testing.assert_allclose(dist.values, [-1.0, 1.0, 1.0, 1.0])
+
+
 def test_categorical_initialization_normalizes_large_finite_probabilities():
     dist = QuantileDistribution.from_categorical(
         levels=[-1.0, 1.0],
@@ -79,11 +91,16 @@ def test_positive_and_negative_distortion_select_upper_and_lower_tails():
     assert dist.distorted_value(-0.5) == -0.5
 
 
-@pytest.mark.parametrize("risk_distortion", [-0.01, 0.01])
-def test_distortion_falls_back_to_all_values_when_tail_is_empty(risk_distortion):
+@pytest.mark.parametrize(
+    ("risk_distortion", "expected"),
+    [(-0.01, -1.0), (0.01, 1.0)],
+)
+def test_distortion_uses_endpoint_quantile_when_sparse_tail_is_empty(
+    risk_distortion, expected
+):
     dist = QuantileDistribution.from_values([-1.0, 0.0, 1.0], -1.0, 1.0)
 
-    assert dist.distorted_value(risk_distortion) == 0.0
+    assert dist.distorted_value(risk_distortion) == expected
 
 
 @pytest.mark.parametrize(
@@ -178,6 +195,25 @@ def test_direct_construction_rejects_invalid_arrays(fractions, values):
         QuantileDistribution(
             np.asarray(fractions),
             np.asarray(values),
+            value_min=-1.0,
+            value_max=1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "fractions",
+    [
+        [0.0, 0.5],
+        [0.2, 0.2],
+        [0.8, 0.2],
+        [0.5, 1.0],
+    ],
+)
+def test_direct_construction_rejects_invalid_fractions(fractions):
+    with pytest.raises(ValueError, match="fractions"):
+        QuantileDistribution(
+            np.asarray(fractions),
+            np.asarray([-1.0, 1.0]),
             value_min=-1.0,
             value_max=1.0,
         )
