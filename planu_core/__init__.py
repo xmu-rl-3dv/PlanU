@@ -1,3 +1,8 @@
+from .adapters.blockworld import (
+    BlockWorldAdapter,
+    BlockWorldScorer,
+    blockworld_config,
+)
 from .adapters.virtualhome import (
     VirtualHomeAdapter,
     VirtualHomeTask,
@@ -25,6 +30,8 @@ __all__ = [
     "ActionCandidate",
     "ActionNode",
     "ActionScorer",
+    "BlockWorldAdapter",
+    "BlockWorldScorer",
     "ConstantActionScorer",
     "CuriosityProvider",
     "EnvironmentAdapter",
@@ -42,6 +49,7 @@ __all__ = [
     "VirtualHomeAdapter",
     "VirtualHomeTask",
     "backup_trajectory",
+    "blockworld_config",
     "describe_virtualhome_observation",
     "select_action",
     "suffix_returns",

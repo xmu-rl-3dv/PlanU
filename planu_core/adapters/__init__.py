@@ -1,3 +1,8 @@
+from .blockworld import (
+    BlockWorldAdapter,
+    BlockWorldScorer,
+    blockworld_config,
+)
 from .overcooked import (
     OvercookedAdapter,
     describe_overcooked_observation,
@@ -11,9 +16,12 @@ from .virtualhome import (
 )
 
 __all__ = [
+    "BlockWorldAdapter",
+    "BlockWorldScorer",
     "OvercookedAdapter",
     "VirtualHomeAdapter",
     "VirtualHomeTask",
+    "blockworld_config",
     "describe_overcooked_observation",
     "describe_virtualhome_observation",
     "overcooked_config",
