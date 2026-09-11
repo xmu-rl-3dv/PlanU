@@ -1069,21 +1069,48 @@ def test_git_commit_lookup_is_graceful(monkeypatch):
     assert inference._git_commit() == "unknown"
 
 
-def test_missing_package_version_is_graceful(monkeypatch):
+def test_missing_package_version_is_graceful():
     inference = importlib.import_module("mcts.overcooked.PlanU_inference")
 
     def missing_version(package):
         raise inference.importlib_metadata.PackageNotFoundError(package)
 
-    monkeypatch.setattr(
-        inference.importlib_metadata,
-        "version",
-        missing_version,
-    )
-
-    assert inference._installed_versions(["numpy", "torch"]) == {
+    assert inference._installed_versions(
+        {"numpy": "numpy", "torch": "torch"},
+        version_lookup=missing_version,
+    ) == {
         "numpy": "not-installed",
         "torch": "not-installed",
+    }
+
+
+def test_installed_versions_queries_di_engine_distribution():
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    requested_distributions = []
+
+    def fake_version(distribution):
+        requested_distributions.append(distribution)
+        if distribution == "DI-engine":
+            return "0.5.3"
+        raise inference.importlib_metadata.PackageNotFoundError(distribution)
+
+    versions = inference._installed_versions(version_lookup=fake_version)
+
+    assert requested_distributions == [
+        "numpy",
+        "torch",
+        "gym",
+        "transformers",
+        "peft",
+        "DI-engine",
+    ]
+    assert versions == {
+        "numpy": "not-installed",
+        "torch": "not-installed",
+        "gym": "not-installed",
+        "transformers": "not-installed",
+        "peft": "not-installed",
+        "ding": "0.5.3",
     }
 
 

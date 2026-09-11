@@ -24,14 +24,15 @@ from planu_core.curiosity import RndCuriosity
 from planu_core.search import PlanUSearch
 
 
-_PROVENANCE_PACKAGES = (
-    "numpy",
-    "torch",
-    "gym",
-    "transformers",
-    "peft",
-    "ding",
-)
+_PROVENANCE_DISTRIBUTIONS = {
+    "numpy": "numpy",
+    "torch": "torch",
+    "gym": "gym",
+    "transformers": "transformers",
+    "peft": "peft",
+    # Keep the import label stable in output; the installed distribution differs.
+    "ding": "DI-engine",
+}
 
 
 def _build_effective_config(args, config):
@@ -78,13 +79,18 @@ def _git_commit() -> str:
     return completed.stdout.strip() or "unknown"
 
 
-def _installed_versions(packages=_PROVENANCE_PACKAGES):
+def _installed_versions(
+    package_distributions=_PROVENANCE_DISTRIBUTIONS,
+    version_lookup=None,
+):
+    if version_lookup is None:
+        version_lookup = importlib_metadata.version
     versions = {}
-    for package in packages:
+    for output_key, distribution_name in package_distributions.items():
         try:
-            versions[package] = importlib_metadata.version(package)
+            versions[output_key] = version_lookup(distribution_name)
         except importlib_metadata.PackageNotFoundError:
-            versions[package] = "not-installed"
+            versions[output_key] = "not-installed"
     return versions
 
 
@@ -92,7 +98,7 @@ def _build_run_metadata():
     return {
         "git_commit": _git_commit(),
         "python_version": platform.python_version(),
-        "packages": _installed_versions(_PROVENANCE_PACKAGES),
+        "packages": _installed_versions(_PROVENANCE_DISTRIBUTIONS),
     }
 
 
