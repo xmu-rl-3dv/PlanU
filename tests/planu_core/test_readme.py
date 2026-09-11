@@ -22,6 +22,7 @@ def test_readme_documents_python_39_and_unified_algorithm():
     required_terms = (
         "one shared PlanU algorithm implementation",
         "no published/canonical split",
+        "Upper Confidence Bounds with Curiosity (UCC)",
         "State Node",
         "Action Node",
         "outcome State Node",
@@ -40,6 +41,19 @@ def test_readme_documents_python_39_and_unified_algorithm():
     assert "Python-3.8" not in readme
     for term in required_terms:
         assert term in normalized_readme
+
+
+def test_readme_links_supported_benchmark_adapters():
+    readme = _readme()
+
+    assert (
+        "[VirtualHome adapter](planu_core/adapters/virtualhome.py)"
+        in readme
+    )
+    assert (
+        "[BlockWorld adapter](planu_core/adapters/blockworld.py)"
+        in readme
+    )
 
 
 def test_readme_documents_core_packages_and_boundaries():

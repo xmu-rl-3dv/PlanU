@@ -19,8 +19,9 @@ there is no published/canonical split. The shared search follows these steps:
    same Action Node are retained as separate children.
 2. Each action owns a **Quantile Distribution**. Candidate initialization uses
    the action scorer plus an optional preview reward.
-3. Every benchmark uses the shared selection score: distorted quantile value
-   plus normalized optional RND curiosity.
+3. Every benchmark uses **Upper Confidence Bounds with Curiosity (UCC)** as the
+   shared selection score: distorted quantile value plus normalized optional
+   RND curiosity, scaled by the configured curiosity weight.
 4. Search keeps a persistent tree across trajectories instead of rebuilding
    the tree after every rollout.
 5. Completed trajectories use a Monte Carlo suffix-return quantile pinball
@@ -93,9 +94,11 @@ The launcher defaults to CUDA devices `0,1,2,3` and
 bash scripts/PlanU_overcooked.sh
 ```
 
-VirtualHome and BlockWorld use their benchmark-specific environment setup and
-adapters with the same shared PlanU core. WebShop and TravelPlanner remain
-phase-two plans and do not have unified-core execution instructions yet.
+VirtualHome and BlockWorld use their benchmark-specific environment setup
+through the [VirtualHome adapter](planu_core/adapters/virtualhome.py) and
+[BlockWorld adapter](planu_core/adapters/blockworld.py), respectively, with the
+same shared PlanU core. WebShop and TravelPlanner remain phase-two plans and do
+not have unified-core execution instructions yet.
 
 ## Outputs And Provenance
 
