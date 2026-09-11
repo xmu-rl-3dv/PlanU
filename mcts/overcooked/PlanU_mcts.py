@@ -12,6 +12,13 @@ LEGACY_BASE_MODEL = "Neko-Institute-of-Science/LLaMA-7B-HF"
 _NORMALIZATION_MODES = {"token", "word", "sum"}
 
 
+def _device_map_for(device: str):
+    resolved_device = str(device)
+    if resolved_device.startswith("cuda"):
+        return "auto"
+    return {"": resolved_device}
+
+
 def normalize_action_scores(
     log_likelihoods: Sequence[float],
     token_lengths: Sequence[int],
@@ -90,7 +97,7 @@ class OvercookedActionScorer:
             if model is None:
                 model = AutoModelForCausalLM.from_pretrained(
                     self.base_model,
-                    device_map="auto",
+                    device_map=_device_map_for(self.device),
                 )
 
         self.tokenizer = tokenizer

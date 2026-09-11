@@ -38,7 +38,7 @@ class FakeAdapter:
 
     def preview(self, state, action, rng):
         self.preview_calls += 1
-        return self._transition(state)
+        return self._transition(copy.deepcopy(state))
 
     def step(self, state, action, rng):
         self.actions_taken.append(action.key)

@@ -1,9 +1,13 @@
 import argparse
 from dataclasses import asdict
+import hashlib
+from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
+import platform
 import random
+import subprocess
 import sys
 import time
 from typing import Optional, Sequence
@@ -18,6 +22,91 @@ from mcts.overcooked.PlanU_mcts import OvercookedActionScorer
 from planu_core.adapters.overcooked import OvercookedAdapter, overcooked_config
 from planu_core.curiosity import RndCuriosity
 from planu_core.search import PlanUSearch
+
+
+_PROVENANCE_PACKAGES = (
+    "numpy",
+    "torch",
+    "gym",
+    "transformers",
+    "peft",
+    "ding",
+)
+
+
+def _build_effective_config(args, config):
+    return {
+        "args": dict(vars(args)),
+        "planu_config": asdict(config),
+    }
+
+
+def _config_hash(effective_config) -> str:
+    serialized = json.dumps(
+        effective_config,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_run_paths(args, run_name, config_hash):
+    result_path = (
+        f"./results/Model={args.base_model}/{run_name}/PlanU/"
+        f"seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}/"
+        f"config={config_hash}"
+    )
+    rnd_path = (
+        f"./rnd_reward/Model={args.base_model}/{run_name}/PlanU/"
+        f"seed={args.seed}/{args.rnd}/transpositions={args.transpositions}/"
+        f"config={config_hash}"
+    )
+    return result_path, rnd_path
+
+
+def _git_commit() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
+
+
+def _installed_versions(packages=_PROVENANCE_PACKAGES):
+    versions = {}
+    for package in packages:
+        try:
+            versions[package] = importlib_metadata.version(package)
+        except importlib_metadata.PackageNotFoundError:
+            versions[package] = "not-installed"
+    return versions
+
+
+def _build_run_metadata():
+    return {
+        "git_commit": _git_commit(),
+        "python_version": platform.python_version(),
+        "packages": _installed_versions(_PROVENANCE_PACKAGES),
+    }
+
+
+def _record_run_provenance(writer, effective_config, run_metadata) -> None:
+    writer.add_text(
+        "planu/effective_config",
+        json.dumps(effective_config, sort_keys=True),
+        global_step=0,
+    )
+    writer.add_text(
+        "planu/run_metadata",
+        json.dumps(run_metadata, sort_keys=True),
+        global_step=0,
+    )
 
 
 def _parse_bool(value):
@@ -208,7 +297,7 @@ def _build_curiosity(args, device, writer):
     return RndCuriosity(model, minimum_samples=15)
 
 
-def build_planu_components(args, envs, device, rnd_writer):
+def build_planu_components(args, envs, device, rnd_writer, config=None):
     scorer = OvercookedActionScorer(
         args.base_model,
         normalization_mode=args.normalization_mode,
@@ -221,12 +310,13 @@ def build_planu_components(args, envs, device, rnd_writer):
         stochastic_probability=args.stochastic,
         rng=np.random.default_rng(args.seed),
     )
-    config = overcooked_config(
-        task=args.task,
-        rnd=args.rnd,
-        max_iterations=args.maxiterations,
-        max_depth=args.depth,
-    )
+    if config is None:
+        config = overcooked_config(
+            task=args.task,
+            rnd=args.rnd,
+            max_iterations=args.maxiterations,
+            max_depth=args.depth,
+        )
     curiosity = (
         _build_curiosity(args, device, rnd_writer) if args.rnd else None
     )
@@ -236,6 +326,16 @@ def build_planu_components(args, envs, device, rnd_writer):
 
 def run(args) -> None:
     validate_args(args)
+
+    config = overcooked_config(
+        task=args.task,
+        rnd=args.rnd,
+        max_iterations=args.maxiterations,
+        max_depth=args.depth,
+    )
+    effective_config = _build_effective_config(args, config)
+    config_hash = _config_hash(effective_config)
+    run_metadata = _build_run_metadata()
 
     import gym
     import torch
@@ -250,19 +350,17 @@ def run(args) -> None:
     else:
         run_name = "tomato_lettuce_salad_temperature"
 
-    result_path = (
-        f"./results/Model={args.base_model}/{run_name}/PlanU/"
-        f"seed={args.seed}/stochastic={args.stochastic}/rnd={args.rnd}"
-    )
-    rnd_path = (
-        f"./rnd_reward/Model={args.base_model}/{run_name}/PlanU/"
-        f"seed={args.seed}/{args.rnd}/transpositions={args.transpositions}"
+    result_path, rnd_path = _build_run_paths(
+        args,
+        run_name,
+        config_hash,
     )
     writer = SummaryWriter(result_path)
     rnd_writer = SummaryWriter(rnd_path)
     envs = None
     scorer = None
     try:
+        _record_run_provenance(writer, effective_config, run_metadata)
         writer.add_text(
             "hyperparameters",
             "|param|value|\n|-|-|\n%s"
@@ -329,11 +427,7 @@ def run(args) -> None:
             envs,
             device,
             rnd_writer,
-        )
-        writer.add_text(
-            "planu/effective_config",
-            json.dumps(asdict(config), sort_keys=True),
-            global_step=0,
+            config,
         )
 
         trajectory_rewards = []

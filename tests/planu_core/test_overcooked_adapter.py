@@ -707,6 +707,57 @@ def test_scorer_module_imports_without_optional_ml_dependencies():
     assert hasattr(module, "normalize_action_scores")
 
 
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [
+        ("cpu", {"": "cpu"}),
+        ("cuda", "auto"),
+        ("cuda:0", "auto"),
+    ],
+)
+def test_scorer_device_map_matches_resolved_device(device, expected):
+    module = importlib.import_module("mcts.overcooked.PlanU_mcts")
+
+    assert module._device_map_for(device) == expected
+
+
+@pytest.mark.parametrize(
+    ("device", "expected_device_map"),
+    [("cpu", {"": "cpu"}), ("cuda", "auto")],
+)
+def test_lazy_model_load_uses_resolved_device_map(
+    monkeypatch,
+    device,
+    expected_device_map,
+):
+    calls = {}
+
+    class FakeModelLoader:
+        @staticmethod
+        def from_pretrained(base_model, **kwargs):
+            calls["model"] = (base_model, kwargs)
+            return object()
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoModelForCausalLM = FakeModelLoader
+    fake_transformers.AutoTokenizer = object()
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    module = importlib.import_module("mcts.overcooked.PlanU_mcts")
+    module.OvercookedActionScorer(
+        "custom/model",
+        tokenizer=object(),
+        model=None,
+        device=device,
+    )
+
+    assert calls["model"] == (
+        "custom/model",
+        {"device_map": expected_device_map},
+    )
+
+
 def test_scorer_module_reexports_shared_search_types():
     module = importlib.import_module("mcts.overcooked.PlanU_mcts")
 
@@ -907,6 +958,7 @@ def test_cli_temperature_only_configures_action_scorer(monkeypatch):
     class RecordingScorer:
         def __init__(self, *args, **kwargs):
             calls["scorer_temperature"] = kwargs["temperature"]
+            calls["scorer_device"] = kwargs["device"]
 
     class RecordingAdapter:
         def __init__(self, *args, **kwargs):
@@ -933,8 +985,164 @@ def test_cli_temperature_only_configures_action_scorer(monkeypatch):
     )
 
     assert calls["scorer_temperature"] == 0.37
+    assert calls["scorer_device"] == "cpu"
     assert "temperature" not in calls["config_kwargs"]
     assert config.selection_temperature == 1.0
+
+
+def test_effective_config_hash_is_canonical_and_materially_sensitive():
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    first_args = types.SimpleNamespace(seed=10, grid_dim=[7, 7])
+    reordered_args = types.SimpleNamespace()
+    reordered_args.grid_dim = [7, 7]
+    reordered_args.seed = 10
+    config = overcooked_config(3, False, 1000, 15)
+
+    first_payload = inference._build_effective_config(first_args, config)
+    reordered_payload = inference._build_effective_config(
+        reordered_args,
+        config,
+    )
+    first_hash = inference._config_hash(first_payload)
+    canonical_json = json.dumps(
+        first_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert first_hash == hashlib.sha256(
+        canonical_json.encode("utf-8")
+    ).hexdigest()[:12]
+    assert inference._config_hash(reordered_payload) == first_hash
+
+    changed_config = overcooked_config(3, False, 1000, 16)
+    changed_payload = inference._build_effective_config(
+        first_args,
+        changed_config,
+    )
+    assert inference._config_hash(changed_payload) != first_hash
+
+
+def test_run_paths_preserve_existing_prefixes_and_append_config_hash():
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    args = inference.parse_args(
+        [
+            "--base-model",
+            "custom/model",
+            "--seed",
+            "17",
+            "--stochastic",
+            "0.4",
+            "--rnd",
+            "True",
+            "--transpositions",
+            "True",
+        ]
+    )
+
+    result_path, rnd_path = inference._build_run_paths(
+        args,
+        "existing-run-name",
+        "abc123def456",
+    )
+
+    assert result_path.startswith(
+        "./results/Model=custom/model/existing-run-name/PlanU/"
+        "seed=17/stochastic=0.4/rnd=True"
+    )
+    assert rnd_path.startswith(
+        "./rnd_reward/Model=custom/model/existing-run-name/PlanU/"
+        "seed=17/True/transpositions=True"
+    )
+    assert result_path.endswith("/config=abc123def456")
+    assert rnd_path.endswith("/config=abc123def456")
+
+
+def test_git_commit_lookup_is_graceful(monkeypatch):
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+
+    def fail_git(*args, **kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr(inference.subprocess, "run", fail_git)
+
+    assert inference._git_commit() == "unknown"
+
+
+def test_missing_package_version_is_graceful(monkeypatch):
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+
+    def missing_version(package):
+        raise inference.importlib_metadata.PackageNotFoundError(package)
+
+    monkeypatch.setattr(
+        inference.importlib_metadata,
+        "version",
+        missing_version,
+    )
+
+    assert inference._installed_versions(["numpy", "torch"]) == {
+        "numpy": "not-installed",
+        "torch": "not-installed",
+    }
+
+
+def test_run_metadata_collects_required_provenance(monkeypatch):
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    requested_packages = []
+
+    monkeypatch.setattr(inference, "_git_commit", lambda: "abc123")
+
+    def installed_versions(packages):
+        requested_packages.extend(packages)
+        return {package: f"{package}-version" for package in packages}
+
+    monkeypatch.setattr(
+        inference,
+        "_installed_versions",
+        installed_versions,
+    )
+
+    metadata = inference._build_run_metadata()
+
+    assert metadata["git_commit"] == "abc123"
+    assert metadata["python_version"]
+    assert requested_packages == [
+        "numpy",
+        "torch",
+        "gym",
+        "transformers",
+        "peft",
+        "ding",
+    ]
+    assert metadata["packages"]["ding"] == "ding-version"
+
+
+def test_provenance_records_json_under_stable_tensorboard_tags():
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    calls = []
+
+    class RecordingWriter:
+        def add_text(self, tag, value, global_step):
+            calls.append((tag, json.loads(value), global_step))
+
+    effective_config = {"args": {"seed": 10}, "planu_config": {"max_depth": 3}}
+    metadata = {
+        "git_commit": "abc123",
+        "python_version": "3.9.0",
+        "packages": {"numpy": "1.0"},
+    }
+
+    inference._record_run_provenance(
+        RecordingWriter(),
+        effective_config,
+        metadata,
+    )
+
+    assert calls == [
+        ("planu/effective_config", effective_config, 0),
+        ("planu/run_metadata", metadata, 0),
+    ]
 
 
 def test_cli_rejects_multiple_envs_and_init_distribution():

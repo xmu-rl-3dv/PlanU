@@ -160,7 +160,7 @@ class PlanUSearch:
         preview_rng = copy.deepcopy(rng)
         for candidate, prior in zip(candidates, priors):
             preview = self.adapter.preview(
-                self.adapter.clone(state),
+                state,
                 candidate,
                 copy.deepcopy(preview_rng),
             )

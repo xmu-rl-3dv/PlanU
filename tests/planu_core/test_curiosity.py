@@ -1,3 +1,4 @@
+import copy
 import os
 import subprocess
 import sys
@@ -85,6 +86,7 @@ class RecordingCuriosity:
 class PreviewDifferentAdapter(FakeAdapter):
     def preview(self, state, action, rng):
         self.preview_calls += 1
+        state = copy.deepcopy(state)
         state.runtime["position"] += 1
         state.observation[...] = 100 + state.runtime["position"]
         return TransitionResult(
@@ -105,7 +107,7 @@ class NoveltyAdapter(FakeAdapter):
 
     def preview(self, state, action, rng):
         self.preview_calls += 1
-        return self._move(state, action)
+        return self._move(copy.deepcopy(state), action)
 
     def step(self, state, action, rng):
         self.actions_taken.append(action.key)

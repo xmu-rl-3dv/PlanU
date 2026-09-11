@@ -61,6 +61,7 @@ class StochasticAdapter(FakeAdapter):
 
     def preview(self, state, action, rng):
         self.preview_calls += 1
+        state = copy.deepcopy(state)
         state.runtime["position"] = 1
         state.observation = np.array([1])
         return TransitionResult(state, 0.0, False, False)
@@ -92,7 +93,7 @@ class BranchingAdapter(FakeAdapter):
     def preview(self, state, action, rng):
         self.preview_calls += 1
         self.preview_start_positions.append(state.runtime["position"])
-        return self._move(state, action)
+        return self._move(copy.deepcopy(state), action)
 
     def step(self, state, action, rng):
         self.actions_taken.append(action.key)
@@ -114,7 +115,7 @@ class FailingSecondPreviewAdapter(BranchingAdapter):
         rng.random()
         if action.key == "right":
             raise RuntimeError("second preview failed")
-        return self._move(state, action)
+        return self._move(copy.deepcopy(state), action)
 
 
 class InPlaceObservationAdapter(FakeAdapter):
@@ -124,6 +125,7 @@ class InPlaceObservationAdapter(FakeAdapter):
 
     def preview(self, state, action, rng):
         self.preview_calls += 1
+        state = copy.deepcopy(state)
         self._move_in_place(state)
         self.preview_observation = state.observation
         return TransitionResult(
@@ -182,6 +184,20 @@ class NoPreviewOutcomeAdapter(FakeAdapter):
         result = super().preview(state, action, rng)
         result.info["record_outcome"] = False
         return result
+
+
+class PreviewOwnsIsolationAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.original_state = None
+
+    def clone(self, state):
+        raise AssertionError("search must not clone before preview")
+
+    def preview(self, state, action, rng):
+        self.preview_calls += 1
+        assert state is self.original_state
+        return self._transition(copy.deepcopy(state))
 
 
 class AdapterTerminalOnlyAdapter(FakeAdapter):
@@ -399,7 +415,7 @@ def test_stochastic_action_accumulates_and_reuses_multiple_outcomes():
     assert action.children[((2,), 2)].outcome_visits == 2
 
 
-def test_each_preview_uses_an_independent_clone_without_mutating_runtime():
+def test_adapter_preview_isolates_each_action_without_core_clone():
     adapter = BranchingAdapter()
     scorer = UniformScorer()
     search = PlanUSearch(adapter, scorer, PlanUConfig())
@@ -409,7 +425,7 @@ def test_each_preview_uses_an_independent_clone_without_mutating_runtime():
     search.expand(root, state, np.random.default_rng(7))
 
     assert adapter.preview_start_positions == [0, 0]
-    assert adapter.clone_calls == 2
+    assert adapter.clone_calls == 0
     assert adapter.preview_calls == 2
     assert scorer.calls == 1
     assert state.runtime == {"position": 0}
@@ -499,6 +515,21 @@ def test_preview_reward_configuration_and_record_outcome_flag():
     assert with_action.distribution.values.dtype == np.float64
     assert without_action.children == {}
     np.testing.assert_array_equal(without_action.preview_state, [1])
+
+
+def test_expand_delegates_preview_isolation_without_cloning_state():
+    adapter = PreviewOwnsIsolationAdapter()
+    search = PlanUSearch(adapter, UniformScorer(), PlanUConfig())
+    state = adapter.reset()
+    adapter.original_state = state
+    root = search._ensure_root(state)
+
+    search.expand(root, state, np.random.default_rng(21))
+
+    assert adapter.preview_calls == 1
+    assert state.runtime == {"position": 0}
+    np.testing.assert_array_equal(state.observation, [0])
+    np.testing.assert_array_equal(root.children["advance"].preview_state, [1])
 
 
 @pytest.mark.parametrize("completion_flag", ["terminated", "truncated"])
