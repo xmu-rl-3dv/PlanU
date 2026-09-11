@@ -65,9 +65,28 @@ def test_readme_scopes_unified_core_claims_to_migrated_phase_one_benchmarks():
         "Overcooked",
         "VirtualHome",
         "BlockWorld",
-        "adapters and configuration",
     ):
         assert term in algorithm
+
+    for shared_component in (
+        "tree",
+        "selection",
+        "quantile",
+        "backup",
+        "search core",
+    ):
+        assert shared_component in algorithm.lower()
+
+    for benchmark_specific_boundary in (
+        "adapters",
+        "action scorers",
+        "runner/evaluator orchestration",
+        "numeric configuration",
+        "outside",
+    ):
+        assert benchmark_specific_boundary in algorithm.lower()
+
+    assert "differences are limited to adapters and configuration" not in algorithm
 
     status = _normalize_whitespace(
         _section(readme, "Unified-core migration status")

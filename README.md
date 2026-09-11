@@ -29,9 +29,10 @@ steps:
 5. Completed trajectories use a Monte Carlo suffix-return quantile pinball
    backup to update every selected action distribution.
 
-For these three migrated phase-one benchmarks, the algorithm and its update
-rules are shared; their benchmark differences are limited to adapters and
-configuration.
+These three migrated phase-one benchmarks share one
+tree/selection/quantile/backup search core. Benchmark-specific adapters, action
+scorers, runner/evaluator orchestration, and numeric configuration remain
+outside the core.
 
 ## BlockWorld Migration Notes
 
