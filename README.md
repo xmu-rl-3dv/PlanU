@@ -68,8 +68,13 @@ in editable mode:
 python3.9 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+python -m pip install easydict DI-engine
 python -m pip install -e .
+python -m pip install -e gym-macro-overcooked
 ```
+
+The Overcooked example script enables RND, so DI-engine and easydict are required
+runtime dependencies.
 
 The benchmark environments remain in `gym-macro-overcooked` and
 `virtual-home`; `planu_core` does not vendor or replace them. BlockWorld

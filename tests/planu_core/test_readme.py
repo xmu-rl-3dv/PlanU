@@ -92,6 +92,33 @@ def test_readme_installation_keeps_benchmark_environments_external():
     assert "environments remain" in readme
 
 
+def test_readme_documents_complete_overcooked_setup():
+    readme = _readme()
+    installation_section = readme.split("## Installation", 1)[1].split("\n## ", 1)[0]
+    bash_blocks = re.findall(
+        r"```bash\n(.*?)```",
+        installation_section,
+        flags=re.DOTALL,
+    )
+
+    assert len(bash_blocks) == 1
+    installation_commands = bash_blocks[0].splitlines()
+    required_commands = (
+        "python -m pip install -r requirements.txt",
+        "python -m pip install easydict DI-engine",
+        "python -m pip install -e .",
+        "python -m pip install -e gym-macro-overcooked",
+    )
+    assert all(command in installation_commands for command in required_commands)
+    assert [installation_commands.index(command) for command in required_commands] == sorted(
+        installation_commands.index(command) for command in required_commands
+    )
+
+    normalized_installation = _normalize_whitespace(installation_section)
+    assert "DI-engine and easydict are required" in normalized_installation
+    assert "example script enables RND" in normalized_installation
+
+
 def test_readme_has_exactly_one_overcooked_experiment_invocation():
     readme = _readme()
     experiment_commands = re.findall(
