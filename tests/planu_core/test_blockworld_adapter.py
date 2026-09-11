@@ -68,7 +68,7 @@ class RecordingSearchConfig:
         return 2.5, {"scored": True}
 
 
-def test_actions_preserve_prior_and_legacy_visit_count_view():
+def test_actions_preserve_prior_and_fast_reward_visit_count_view():
     world = FakeWorldModel()
     search_config = RecordingSearchConfig()
     adapter = BlockWorldAdapter(world, search_config)
@@ -80,9 +80,9 @@ def test_actions_preserve_prior_and_legacy_visit_count_view():
     assert candidate.payload == "move"
     assert candidate.text == "move"
     assert candidate.metadata["prior_score"] == 0.75
-    assert candidate.metadata["node_view"].state == state.observation
-    assert candidate.metadata["node_view"].cum_rewards == []
-    assert search_config.fast_nodes == [candidate.metadata["node_view"]]
+    assert "node_view" not in candidate.metadata
+    assert search_config.fast_nodes[0].state == state.observation
+    assert search_config.fast_nodes[0].cum_rewards == []
     with pytest.raises(TypeError):
         candidate.metadata["prior_score"] = 0.0
 
@@ -93,7 +93,8 @@ def test_actions_preserve_prior_and_legacy_visit_count_view():
     }
 
     later = adapter.actions(state, state_visit_count=4)[0]
-    assert len(later.metadata["node_view"].cum_rewards) == 3
+    assert "node_view" not in later.metadata
+    assert len(search_config.fast_nodes[1].cum_rewards) == 3
 
 
 @pytest.mark.parametrize(
@@ -148,10 +149,13 @@ def test_step_forwards_fast_details_node_view_aux_and_supplied_rng():
     action = adapter.actions(state, state_visit_count=1)[0]
     rng = np.random.default_rng(42)
 
-    result = adapter.step(state, action, rng)
+    result = adapter.step(state, action, rng, state_visit_count=3)
 
     node, payload, kwargs = search_config.reward_call
-    assert node is action.metadata["node_view"]
+    assert node is result.info["node_view"]
+    assert node is not search_config.fast_nodes[0]
+    assert node.state == state.observation
+    assert node.cum_rewards == [0.0, 0.0, 0.0]
     assert payload == "move"
     assert kwargs == {
         "intuition": 0.2,
@@ -166,8 +170,8 @@ def test_step_forwards_fast_details_node_view_aux_and_supplied_rng():
     assert result.info["node_view"] is node
     assert result.info["reward_visit"] == {
         "reward": 2.5,
-        "count_before": 0,
-        "count_after": 1,
+        "count_before": 3,
+        "count_after": 4,
     }
     assert {
         key: value
@@ -194,7 +198,9 @@ def test_step_supports_a_bare_state_result():
         "intuition": 0.2,
         "nested": ["original"],
     }
-    assert result.info["node_view"] is action.metadata["node_view"]
+    assert result.info["node_view"] is search_config.reward_call[0]
+    assert result.info["node_view"] is not search_config.fast_nodes[0]
+    assert result.info["node_view"].cum_rewards == []
     assert result.info["reward_visit"] == {
         "reward": 2.5,
         "count_before": 0,
@@ -207,7 +213,7 @@ def test_step_supports_a_bare_state_result():
     } == {"scored": True}
 
 
-def test_repeated_steps_advance_reward_visit_count_after_each_reward():
+def test_repeated_steps_derive_reward_visit_count_from_core_argument():
     class VisitRecordingConfig(RecordingSearchConfig):
         def __init__(self):
             super().__init__()
@@ -223,16 +229,23 @@ def test_repeated_steps_advance_reward_visit_count_after_each_reward():
     action = adapter.actions(state, state_visit_count=1)[0]
 
     results = [
-        adapter.step(state, action, np.random.default_rng(seed))
+        adapter.step(
+            state,
+            action,
+            np.random.default_rng(seed),
+            state_visit_count=seed,
+        )
         for seed in range(3)
     ]
 
     assert search_config.reward_visits == [0, 1, 2]
-    assert action.metadata["node_view"].cum_rewards == [1.0, 2.0, 3.0]
-    assert all(
-        result.info["node_view"] is action.metadata["node_view"]
-        for result in results
-    )
+    assert "node_view" not in action.metadata
+    assert [result.info["node_view"].cum_rewards for result in results] == [
+        [],
+        [0.0],
+        [0.0, 0.0],
+    ]
+    assert len({id(result.info["node_view"]) for result in results}) == 3
     assert [
         result.info["reward_visit"]
         for result in results
@@ -243,7 +256,7 @@ def test_repeated_steps_advance_reward_visit_count_after_each_reward():
     ]
 
 
-def test_different_actions_share_reward_visit_count():
+def test_different_actions_receive_core_reward_visit_count():
     class MultiActionConfig(RecordingSearchConfig):
         def __init__(self):
             super().__init__()
@@ -261,12 +274,22 @@ def test_different_actions_share_reward_visit_count():
     state = adapter.reset()
     first, second = adapter.actions(state, state_visit_count=1)
 
-    adapter.step(state, first, np.random.default_rng(1))
-    adapter.step(state, second, np.random.default_rng(2))
+    adapter.step(
+        state,
+        first,
+        np.random.default_rng(1),
+        state_visit_count=0,
+    )
+    adapter.step(
+        state,
+        second,
+        np.random.default_rng(2),
+        state_visit_count=1,
+    )
 
-    assert first.metadata["node_view"] is second.metadata["node_view"]
+    assert "node_view" not in first.metadata
+    assert "node_view" not in second.metadata
     assert search_config.reward_visits == [("move", 0), ("stack", 1)]
-    assert first.metadata["node_view"].cum_rewards == [1.0, 1.0]
 
 
 def test_failed_world_or_reward_call_does_not_advance_reward_visit_count():
@@ -294,7 +317,7 @@ def test_failed_world_or_reward_call_does_not_advance_reward_visit_count():
             world_action,
             np.random.default_rng(1),
         )
-    assert world_action.metadata["node_view"].cum_rewards == []
+    assert "node_view" not in world_action.metadata
 
     reward_adapter = BlockWorldAdapter(
         FakeWorldModel(),
@@ -312,7 +335,7 @@ def test_failed_world_or_reward_call_does_not_advance_reward_visit_count():
             reward_action,
             np.random.default_rng(2),
         )
-    assert reward_action.metadata["node_view"].cum_rewards == []
+    assert "node_view" not in reward_action.metadata
 
 
 def test_failed_terminal_check_does_not_advance_reward_visit_count():
@@ -336,7 +359,8 @@ def test_failed_terminal_check_does_not_advance_reward_visit_count():
 
     assert search_config.reward_call is not None
     assert world.terminal_calls == 1
-    assert action.metadata["node_view"].cum_rewards == []
+    assert search_config.reward_call[0].cum_rewards == []
+    assert "node_view" not in action.metadata
 
 
 @pytest.mark.parametrize(
@@ -362,7 +386,7 @@ def test_step_validates_reward_result_shape_and_finiteness(
 
     with pytest.raises(ValueError, match=message):
         adapter.step(state, action, np.random.default_rng(5))
-    assert action.metadata["node_view"].cum_rewards == []
+    assert "node_view" not in action.metadata
 
 
 @dataclass
@@ -445,11 +469,16 @@ def test_repeated_action_accumulates_success_and_failure_outcomes():
             }
 
     class AlternatingConfig(RecordingSearchConfig):
+        def __init__(self):
+            super().__init__()
+            self.reward_visits = []
+
         def fast_reward(self, node, action):
             self.fast_nodes.append(node)
             return 0.0, {}
 
         def reward(self, node, action, success):
+            self.reward_visits.append(len(node.cum_rewards))
             return (1.0 if success else 0.0), {"success": success}
 
     world = AlternatingWorld()
@@ -467,7 +496,8 @@ def test_repeated_action_accumulates_success_and_failure_outcomes():
 
     assert first.final_observation.blocks_state == "success"
     assert second.final_observation.blocks_state == "failure"
-    assert search_config.fast_nodes[0].cum_rewards == [1.0, 0.0]
+    assert search_config.fast_nodes[0].cum_rewards == []
+    assert search_config.reward_visits == [0, 1]
     action_node = search.root.children["move"]
     assert set(action_node.children) == {
         adapter.state_key(
@@ -478,6 +508,67 @@ def test_repeated_action_accumulates_success_and_failure_outcomes():
         ),
     }
     assert world.step_calls == 2
+
+
+def test_reward_visits_rollback_with_search_state_after_core_failure():
+    class FailingSecondCoreTerminalWorld(FakeWorldModel):
+        def __init__(self):
+            super().__init__()
+            self.terminal_checks_after_step = 0
+
+        def step(self, state, action):
+            result = super().step(state, action)
+            self.terminal_checks_after_step = 0
+            return result
+
+        def is_terminal(self, state):
+            if state.step_idx >= 1:
+                self.terminal_checks_after_step += 1
+                if (
+                    self.step_calls == 2
+                    and self.terminal_checks_after_step == 2
+                ):
+                    raise RuntimeError("core terminal validation failed")
+                return self.terminal_checks_after_step >= 2
+            return False
+
+    class VisitRecordingConfig(RecordingSearchConfig):
+        def __init__(self):
+            super().__init__()
+            self.reward_visits = []
+
+        def reward(self, node, action, **kwargs):
+            self.reward_visits.append(len(node.cum_rewards))
+            return 1.0, {}
+
+    search_config = VisitRecordingConfig()
+    search = PlanUSearch(
+        BlockWorldAdapter(
+            FailingSecondCoreTerminalWorld(),
+            search_config,
+        ),
+        BlockWorldScorer(),
+        blockworld_config(4, 1, 11, 0.0),
+    )
+    rng = np.random.default_rng(29)
+
+    first = search.run_iteration(0, rng)
+    with pytest.raises(
+        RuntimeError,
+        match="core terminal validation failed",
+    ):
+        search.run_iteration(1, rng)
+    retry = search.run_iteration(1, rng)
+    third = search.run_iteration(2, rng)
+
+    assert first.terminated is True
+    assert retry.terminated is True
+    assert third.terminated is True
+    assert search_config.reward_visits == [0, 1, 1, 2]
+    assert [
+        search_config.reward_visits[index]
+        for index in (0, 2, 3)
+    ] == [0, 1, 2]
 
 
 def test_scorer_order_config_values_and_public_exports():
@@ -567,11 +658,16 @@ class WrapperWorld(FakeWorldModel):
 
 
 class WrapperSearchConfig(RecordingSearchConfig):
+    def __init__(self):
+        super().__init__()
+        self.reward_visits = []
+
     def fast_reward(self, node, action):
         self.fast_nodes.append(node)
         return 0.0, {}
 
     def reward(self, node, action, success):
+        self.reward_visits.append(len(node.cum_rewards))
         return (4.0 if success else -1.0), {"success": success}
 
 
@@ -624,7 +720,8 @@ def test_blockworld_wrapper_executes_shared_search_and_returns_best_trace(
     assert result.aggregated_result is None
     assert len(set(world.rng_ids)) == 1
     assert len(result.tree_state.children["move"].children) == 2
-    assert search_config.fast_nodes[0].cum_rewards == [-1.0, 4.0]
+    assert search_config.fast_nodes[0].cum_rewards == []
+    assert search_config.reward_visits == [0, 1]
 
 
 def test_blockworld_wrapper_uses_best_nonterminal_and_handles_empty_path(

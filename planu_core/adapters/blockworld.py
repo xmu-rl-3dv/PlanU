@@ -166,7 +166,6 @@ class BlockWorldAdapter:
                     details,
                     "fast reward",
                 ),
-                "node_view": node_view,
             }
             candidates.append(
                 ActionCandidate(
@@ -201,6 +200,7 @@ class BlockWorldAdapter:
         state: EnvironmentState,
         action: ActionCandidate,
         rng: np.random.Generator,
+        state_visit_count: int = 0,
     ) -> TransitionResult:
         if hasattr(self.world_model, "rng"):
             self.world_model.rng = rng
@@ -221,7 +221,10 @@ class BlockWorldAdapter:
 
         reward_kwargs = dict(action.metadata["fast_reward_details"])
         reward_kwargs.update(aux)
-        node_view = action.metadata["node_view"]
+        node_view = SimpleNamespace(
+            state=state.observation,
+            cum_rewards=[0.0] * state_visit_count,
+        )
         raw_reward = self.search_config.reward(
             node_view,
             action.payload,
@@ -232,24 +235,21 @@ class BlockWorldAdapter:
         scalar_reward = _scalar_finite(reward, "reward")
         next_state = EnvironmentState(next_observation, None)
         terminated = bool(self.world_model.is_terminal(next_observation))
-        visit_count = len(node_view.cum_rewards)
         info = dict(details)
         info.update(aux)
         info["node_view"] = node_view
         info["reward_visit"] = {
             "reward": scalar_reward,
-            "count_before": visit_count,
-            "count_after": visit_count + 1,
+            "count_before": state_visit_count,
+            "count_after": state_visit_count + 1,
         }
-        result = TransitionResult(
+        return TransitionResult(
             state=next_state,
             reward=scalar_reward,
             terminated=terminated,
             truncated=False,
             info=info,
         )
-        node_view.cum_rewards.append(scalar_reward)
-        return result
 
     def state_key(self, state: EnvironmentState) -> Hashable:
         return _freeze_state(state.observation)

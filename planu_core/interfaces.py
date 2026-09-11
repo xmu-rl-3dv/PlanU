@@ -66,6 +66,7 @@ class EnvironmentAdapter(Protocol):
         state: EnvironmentState,
         action: ActionCandidate,
         rng: np.random.Generator,
+        state_visit_count: int = 0,
     ) -> TransitionResult:
         ...
 

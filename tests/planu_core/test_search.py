@@ -66,7 +66,8 @@ class StochasticAdapter(FakeAdapter):
         state.observation = np.array([1])
         return TransitionResult(state, 0.0, False, False)
 
-    def step(self, state, action, rng):
+    def step(self, state, action, rng, state_visit_count=0):
+        del state_visit_count
         self.actions_taken.append(action.key)
         self.step_calls += 1
         position = 1 if self.step_calls % 2 else 2
@@ -95,7 +96,8 @@ class BranchingAdapter(FakeAdapter):
         self.preview_start_positions.append(state.runtime["position"])
         return self._move(copy.deepcopy(state), action)
 
-    def step(self, state, action, rng):
+    def step(self, state, action, rng, state_visit_count=0):
+        del state_visit_count
         self.actions_taken.append(action.key)
         return self._move(state, action)
 
@@ -136,7 +138,8 @@ class InPlaceObservationAdapter(FakeAdapter):
             {"record_outcome": False},
         )
 
-    def step(self, state, action, rng):
+    def step(self, state, action, rng, state_visit_count=0):
+        del state_visit_count
         self.actions_taken.append(action.key)
         self._move_in_place(state)
         return TransitionResult(state, 1.0, False, False)
@@ -152,8 +155,13 @@ class ConfigurableRewardAdapter(FakeAdapter):
         super().__init__()
         self.step_reward = 1.0
 
-    def step(self, state, action, rng):
-        result = super().step(state, action, rng)
+    def step(self, state, action, rng, state_visit_count=0):
+        result = super().step(
+            state,
+            action,
+            rng,
+            state_visit_count=state_visit_count,
+        )
         result.reward = self.step_reward
         return result
 

@@ -276,7 +276,12 @@ class PlanUSearch:
                 rng,
                 novelty,
             )
-            result = self.adapter.step(state, action_node.action, rng)
+            result = self.adapter.step(
+                state,
+                action_node.action,
+                rng,
+                state_visit_count=max(0, node.visit_count - 1),
+            )
             try:
                 reward = float(result.reward)
             except (TypeError, ValueError) as error:
