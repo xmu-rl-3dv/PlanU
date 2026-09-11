@@ -37,11 +37,33 @@ def backup_trajectory(
         raise ValueError("action path and reward lengths differ")
 
     returns = suffix_returns(rewards, config.discount)
-    for action, target in zip(action_path, returns):
-        action.visit_count += 1
-        action.cumulative_returns.append(target)
-        action.distribution.update_scalar(
-            target,
-            config.quantile_learning_rate,
-        )
+    snapshots = []
+    seen_action_ids = set()
+    for action in action_path:
+        action_id = id(action)
+        if action_id not in seen_action_ids:
+            seen_action_ids.add(action_id)
+            snapshots.append(
+                (
+                    action,
+                    action.visit_count,
+                    action.cumulative_returns.copy(),
+                    action.distribution.values.copy(),
+                )
+            )
+
+    try:
+        for action, target in zip(action_path, returns):
+            action.visit_count += 1
+            action.cumulative_returns.append(target)
+            action.distribution.update_scalar(
+                target,
+                config.quantile_learning_rate,
+            )
+    except BaseException:
+        for action, visit_count, cumulative_returns, values in snapshots:
+            action.visit_count = visit_count
+            action.cumulative_returns[:] = cumulative_returns
+            action.distribution.values[:] = values
+        raise
     return returns

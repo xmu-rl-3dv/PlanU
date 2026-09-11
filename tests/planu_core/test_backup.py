@@ -78,6 +78,77 @@ def test_backup_updates_each_selected_action_once():
     )
 
 
+def test_backup_rolls_back_every_action_when_later_distribution_update_fails(
+    monkeypatch,
+):
+    first = make_action_node("first")
+    second = make_action_node("second")
+    first.visit_count = 3
+    first.cumulative_returns[:] = [-0.5]
+    first.distribution.values[:] = [-1.0, 0.25, 0.75]
+    second.visit_count = 7
+    second.cumulative_returns[:] = [0.5, 1.0]
+    second.distribution.values[:] = [-0.75, 0.0, 1.25]
+    before = [snapshot(first), snapshot(second)]
+    return_lists = [first.cumulative_returns, second.cumulative_returns]
+    value_arrays = [first.distribution.values, second.distribution.values]
+    sentinel = RuntimeError("sentinel update failure")
+
+    def fail_update(target, learning_rate):
+        raise sentinel
+
+    monkeypatch.setattr(second.distribution, "update_scalar", fail_update)
+
+    with pytest.raises(RuntimeError, match="sentinel update failure") as raised:
+        backup_trajectory([first, second], [0.25, 1.0], PlanUConfig())
+
+    assert raised.value is sentinel
+    for action, action_before, return_list, value_array in zip(
+        [first, second], before, return_lists, value_arrays
+    ):
+        assert_unchanged(action, action_before)
+        assert action.cumulative_returns is return_list
+        assert action.distribution.values is value_array
+
+
+def test_backup_snapshots_repeated_action_once_before_any_update(monkeypatch):
+    action = make_action_node()
+    action.visit_count = 4
+    action.cumulative_returns[:] = [-1.0, 0.25]
+    action.distribution.values[:] = [-1.5, -0.25, 1.5]
+    before = snapshot(action)
+    return_list = action.cumulative_returns
+    value_array = action.distribution.values
+    original_update = action.distribution.update_scalar
+    sentinel = RuntimeError("sentinel repeated update failure")
+    update_calls = 0
+
+    def fail_second_update(target, learning_rate):
+        nonlocal update_calls
+        update_calls += 1
+        if update_calls == 2:
+            raise sentinel
+        original_update(target, learning_rate)
+
+    monkeypatch.setattr(
+        action.distribution,
+        "update_scalar",
+        fail_second_update,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="sentinel repeated update failure",
+    ) as raised:
+        backup_trajectory([action, action], [0.5, 1.0], PlanUConfig())
+
+    assert raised.value is sentinel
+    assert update_calls == 2
+    assert_unchanged(action, before)
+    assert action.cumulative_returns is return_list
+    assert action.distribution.values is value_array
+
+
 def test_suffix_returns_apply_discount():
     assert suffix_returns([0.25, 1.0], 0.5) == [0.75, 1.0]
 
