@@ -164,10 +164,15 @@ def test_step_forwards_fast_details_node_view_aux_and_supplied_rng():
     assert result.terminated is True
     assert result.truncated is False
     assert result.info["node_view"] is node
+    assert result.info["reward_visit"] == {
+        "reward": 2.5,
+        "count_before": 0,
+        "count_after": 1,
+    }
     assert {
         key: value
         for key, value in result.info.items()
-        if key != "node_view"
+        if key not in {"node_view", "reward_visit"}
     } == {"scored": True, "success": True}
 
 
@@ -190,10 +195,15 @@ def test_step_supports_a_bare_state_result():
         "nested": ["original"],
     }
     assert result.info["node_view"] is action.metadata["node_view"]
+    assert result.info["reward_visit"] == {
+        "reward": 2.5,
+        "count_before": 0,
+        "count_after": 1,
+    }
     assert {
         key: value
         for key, value in result.info.items()
-        if key != "node_view"
+        if key not in {"node_view", "reward_visit"}
     } == {"scored": True}
 
 
@@ -223,6 +233,14 @@ def test_repeated_steps_advance_reward_visit_count_after_each_reward():
         result.info["node_view"] is action.metadata["node_view"]
         for result in results
     )
+    assert [
+        result.info["reward_visit"]
+        for result in results
+    ] == [
+        {"reward": 1.0, "count_before": 0, "count_after": 1},
+        {"reward": 2.0, "count_before": 1, "count_after": 2},
+        {"reward": 3.0, "count_before": 2, "count_after": 3},
+    ]
 
 
 def test_different_actions_share_reward_visit_count():
@@ -295,6 +313,30 @@ def test_failed_world_or_reward_call_does_not_advance_reward_visit_count():
             np.random.default_rng(2),
         )
     assert reward_action.metadata["node_view"].cum_rewards == []
+
+
+def test_failed_terminal_check_does_not_advance_reward_visit_count():
+    class FailingTerminalWorld(FakeWorldModel):
+        def __init__(self):
+            super().__init__()
+            self.terminal_calls = 0
+
+        def is_terminal(self, state):
+            self.terminal_calls += 1
+            raise RuntimeError("terminal failed")
+
+    world = FailingTerminalWorld()
+    search_config = RecordingSearchConfig()
+    adapter = BlockWorldAdapter(world, search_config)
+    state = adapter.reset()
+    action = adapter.actions(state, state_visit_count=1)[0]
+
+    with pytest.raises(RuntimeError, match="terminal failed"):
+        adapter.step(state, action, np.random.default_rng(3))
+
+    assert search_config.reward_call is not None
+    assert world.terminal_calls == 1
+    assert action.metadata["node_view"].cum_rewards == []
 
 
 @pytest.mark.parametrize(
@@ -807,6 +849,20 @@ def test_evaluate_entrypoint_imports_without_a_deepseek_model(monkeypatch):
         ],
     )
     assert module.parse_args().algorithm == "planu"
+    assert module.benchmark_paths("v1", "2") == (
+        "examples/CoT/blocksworld/prompts/pool_prompt_v1.json",
+        "examples/CoT/blocksworld/data/split_v1/"
+        "split_v1_step_2_data.json",
+    )
+    assert module.benchmark_paths("v2", "12") == (
+        "examples/CoT/blocksworld/prompts/pool_prompt_v2_step_12.json",
+        "examples/CoT/blocksworld/data/split_v2/"
+        "split_v2_step_12_data.json",
+    )
+    for relative_path in module.benchmark_paths("v1", "2"):
+        assert (EVALUATE_PATH.parent / relative_path).is_file()
+    for relative_path in module.benchmark_paths("v2", "12"):
+        assert (EVALUATE_PATH.parent / relative_path).is_file()
 
 
 def test_evaluate_reward_keeps_fast_prior_and_includes_first_goal_reward():

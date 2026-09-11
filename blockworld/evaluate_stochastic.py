@@ -55,6 +55,24 @@ def parse_args():
 
     return parser.parse_args()
 
+
+def benchmark_paths(version: str, steps: str) -> tuple[str, str]:
+    if version == "v1":
+        prompt_path = (
+            "examples/CoT/blocksworld/prompts/pool_prompt_v1.json"
+        )
+    else:
+        prompt_path = (
+            "examples/CoT/blocksworld/prompts/"
+            f"pool_prompt_{version}_step_{steps}.json"
+        )
+    data_path = (
+        "examples/CoT/blocksworld/data/"
+        f"split_{version}/split_{version}_step_{steps}_data.json"
+    )
+    return prompt_path, data_path
+
+
 BWAction = str
 
 class BWStateRAP(NamedTuple):
@@ -288,8 +306,7 @@ if __name__ == "__main__":
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     version = f"v{args.version}"
     steps = args.steps
-    prompt_path = f'examples/CoT/blocksworld/prompts/pool_prompt_{version}_step_{steps}.json'
-    data_path = f'examples/CoT/blocksworld/data/split_{version}/split_{version}_step_{steps}_data.json'
+    prompt_path, data_path = benchmark_paths(version, steps)
 
     with open(prompt_path) as f:
         prompt = json.load(f)

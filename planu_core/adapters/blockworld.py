@@ -230,17 +230,26 @@ class BlockWorldAdapter:
         reward, raw_details = _result_pair(raw_reward, "reward")
         details = _copied_mapping(raw_details, "reward")
         scalar_reward = _scalar_finite(reward, "reward")
-        node_view.cum_rewards.append(scalar_reward)
+        next_state = EnvironmentState(next_observation, None)
+        terminated = bool(self.world_model.is_terminal(next_observation))
+        visit_count = len(node_view.cum_rewards)
         info = dict(details)
         info.update(aux)
         info["node_view"] = node_view
-        return TransitionResult(
-            state=EnvironmentState(next_observation, None),
+        info["reward_visit"] = {
+            "reward": scalar_reward,
+            "count_before": visit_count,
+            "count_after": visit_count + 1,
+        }
+        result = TransitionResult(
+            state=next_state,
             reward=scalar_reward,
-            terminated=bool(self.world_model.is_terminal(next_observation)),
+            terminated=terminated,
             truncated=False,
             info=info,
         )
+        node_view.cum_rewards.append(scalar_reward)
+        return result
 
     def state_key(self, state: EnvironmentState) -> Hashable:
         return _freeze_state(state.observation)
