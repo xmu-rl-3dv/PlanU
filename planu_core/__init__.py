@@ -10,6 +10,7 @@ from .interfaces import (
     TransitionResult,
 )
 from .nodes import ActionNode, LanguageNode
+from .search import PlanUSearch, TrajectoryResult
 from .selection import select_action
 
 __all__ = [
@@ -21,8 +22,10 @@ __all__ = [
     "EnvironmentState",
     "LanguageNode",
     "PlanUConfig",
+    "PlanUSearch",
     "QuantileDistribution",
     "SelectionSchedule",
+    "TrajectoryResult",
     "TransitionResult",
     "backup_trajectory",
     "select_action",
