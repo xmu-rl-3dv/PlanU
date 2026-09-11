@@ -75,6 +75,10 @@ class PlanUSearch:
                 candidate,
                 rng,
             )
+            preview_terminated = (
+                preview.terminated
+                or self.adapter.is_terminal(preview.state)
+            )
             initial = float(prior)
             if self.config.include_preview_reward:
                 initial += float(preview.reward)
@@ -93,7 +97,7 @@ class PlanUSearch:
                 action.get_or_create_outcome(
                     preview.state.observation,
                     self.adapter.state_key(preview.state),
-                    preview.terminated,
+                    preview_terminated,
                     preview.truncated,
                     increment_visit=False,
                 )

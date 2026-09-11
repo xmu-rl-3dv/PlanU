@@ -135,6 +135,19 @@ class NoPreviewOutcomeAdapter(FakeAdapter):
         return result
 
 
+class AdapterTerminalOnlyAdapter(FakeAdapter):
+    @staticmethod
+    def _transition(state):
+        state.runtime["position"] += 1
+        state.observation = np.array([state.runtime["position"]])
+        return TransitionResult(
+            state=state,
+            reward=1.0,
+            terminated=False,
+            truncated=False,
+        )
+
+
 def test_search_types_are_exported_from_package():
     import planu_core
 
@@ -197,6 +210,26 @@ def test_two_step_run_merges_preview_and_execution_then_backs_up():
     position_two = second_action.children[((2,), 2)]
     assert second_action.cumulative_returns == [1.0]
     assert position_two is result.state_path[2]
+    assert position_two.outcome_visits == 1
+
+
+def test_preview_terminal_state_uses_adapter_terminal_normalization():
+    search = PlanUSearch(
+        AdapterTerminalOnlyAdapter(),
+        UniformScorer(),
+        PlanUConfig(max_depth=3, value_max=3.0),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(18))
+
+    assert result.actions == ["advance", "advance"]
+    assert result.terminated is True
+    assert result.truncated is False
+    np.testing.assert_array_equal(result.final_observation, [2])
+    position_one = search.root.children["advance"].children[((1,), 1)]
+    position_two = position_one.children["advance"].children[((2,), 2)]
+    assert position_two is result.state_path[-1]
+    assert position_two.terminated is True
     assert position_two.outcome_visits == 1
 
 
