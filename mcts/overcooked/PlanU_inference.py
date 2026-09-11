@@ -208,6 +208,32 @@ def _build_curiosity(args, device, writer):
     return RndCuriosity(model, minimum_samples=15)
 
 
+def build_planu_components(args, envs, device, rnd_writer):
+    scorer = OvercookedActionScorer(
+        args.base_model,
+        normalization_mode=args.normalization_mode,
+        temperature=args.temperature,
+        device=str(device),
+    )
+    adapter = OvercookedAdapter(
+        envs,
+        task=args.task,
+        stochastic_probability=args.stochastic,
+        rng=np.random.default_rng(args.seed),
+    )
+    config = overcooked_config(
+        task=args.task,
+        rnd=args.rnd,
+        max_iterations=args.maxiterations,
+        max_depth=args.depth,
+    )
+    curiosity = (
+        _build_curiosity(args, device, rnd_writer) if args.rnd else None
+    )
+    search = PlanUSearch(adapter, scorer, config, curiosity)
+    return search, scorer, config
+
+
 def run(args) -> None:
     validate_args(args)
 
@@ -298,34 +324,17 @@ def run(args) -> None:
             gym.spaces.Discrete,
         ), "only discrete action space is supported"
 
-        scorer = OvercookedActionScorer(
-            args.base_model,
-            normalization_mode=args.normalization_mode,
-            temperature=args.temperature,
-            device=str(device),
-        )
-        adapter = OvercookedAdapter(
+        search, scorer, config = build_planu_components(
+            args,
             envs,
-            task=args.task,
-            stochastic_probability=args.stochastic,
-            rng=np.random.default_rng(args.seed),
-        )
-        config = overcooked_config(
-            task=args.task,
-            rnd=args.rnd,
-            max_iterations=args.maxiterations,
-            max_depth=args.depth,
-            temperature=args.temperature,
+            device,
+            rnd_writer,
         )
         writer.add_text(
             "planu/effective_config",
             json.dumps(asdict(config), sort_keys=True),
             global_step=0,
         )
-        curiosity = (
-            _build_curiosity(args, device, rnd_writer) if args.rnd else None
-        )
-        search = PlanUSearch(adapter, scorer, config, curiosity)
 
         trajectory_rewards = []
         global_step = 0

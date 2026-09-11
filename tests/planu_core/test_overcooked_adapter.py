@@ -1,6 +1,9 @@
 import ast
 import copy
+import hashlib
 import importlib
+import itertools
+import json
 import math
 from pathlib import Path
 import subprocess
@@ -15,7 +18,8 @@ from planu_core.adapters.overcooked import (
     describe_overcooked_observation,
     overcooked_config,
 )
-from planu_core.interfaces import ActionCandidate
+from planu_core.interfaces import ActionCandidate, EnvironmentState
+from planu_core.nodes import ActionNode, LanguageNode
 from planu_core.search import PlanUSearch
 
 
@@ -62,6 +66,70 @@ TASK_3_INITIAL = np.array(
 )
 TASK_3_AT_BOARD = TASK_3_INITIAL.copy()
 TASK_3_AT_BOARD[0, :3] = [1, 0, 0]
+# Frozen after all generated cases matched the final active LLMAgent.obs2text
+# method from fac4fd3^ in an independent one-off differential run.
+LEGACY_PARITY_SHA256 = (
+    "32160fdc84619214ee1ee2f3631729c1f1c445c9052bb24c9092e4dfcefc9230"
+)
+
+
+def _item_position(location, original, agent):
+    return {
+        "origin": original,
+        "board_1": (1, 0),
+        "board_2": (2, 0),
+        "hand": agent,
+        "off_grid": (9, 9),
+    }[location]
+
+
+def _overcooked_parity_states():
+    """Yield 18 task-0 and 3,600 task-3 deterministic observations.
+
+    Task 0 bounds are 3 tomato locations x 3 bowl locations x 2 agent
+    locations. Task 3 bounds are 5 tomato x 5 lettuce x 4 onion x 3 bowl
+    locations x 3 agent locations x 4 chop profiles.
+    """
+    for tomato, bowl, agent in itertools.product(
+        ("origin", "board_1", "hand"),
+        ("origin", "board_1", "hand"),
+        ((1, 1), (0, 0)),
+    ):
+        observation = np.zeros(18, dtype=np.float32)
+        observation[0:2] = _item_position(tomato, (0, 5), agent)
+        observation[3:5] = _item_position(bowl, (6, 5), agent)
+        observation[9:11] = agent
+        yield 0, observation
+
+    chop_profiles = (
+        (0, 0, 0),
+        (3, 0, 0),
+        (0, 3, 0),
+        (0, 0, 3),
+    )
+    for tomato, lettuce, onion, bowl, agent, chopped in itertools.product(
+        ("origin", "board_1", "board_2", "hand", "off_grid"),
+        ("origin", "board_1", "board_2", "hand", "off_grid"),
+        ("origin", "board_1", "board_2", "hand"),
+        ("origin", "board_1", "hand"),
+        ((1, 1), (2, 1), (0, 0)),
+        chop_profiles,
+    ):
+        observation = np.zeros(26, dtype=np.float32)
+        for index, (location, original) in enumerate(
+            zip(
+                (tomato, lettuce, onion, bowl),
+                ((0, 5), (1, 6), (2, 6), (6, 5)),
+            )
+        ):
+            observation[3 * index : 3 * index + 2] = _item_position(
+                location,
+                original,
+                agent,
+            )
+        observation[2], observation[5], observation[8] = chopped
+        observation[17:19] = agent
+        yield 3, observation
 
 
 class FakeInnerEnv:
@@ -174,6 +242,30 @@ def test_task_three_prompt_and_action_order_match_reference_fixture():
     }
 
 
+def test_generated_observations_match_active_legacy_prompt_action_digest():
+    records = []
+    for task, observation in _overcooked_parity_states():
+        description = describe_overcooked_observation(observation, task)
+        records.append(
+            {
+                "task": task,
+                "prompt": description["prompt"],
+                "actions": description["action"],
+            }
+        )
+
+    serialized = json.dumps(
+        records,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+    assert len(records) == 3618
+    assert hashlib.sha256(serialized.encode("utf-8")).hexdigest() == (
+        LEGACY_PARITY_SHA256
+    )
+
+
 @pytest.mark.parametrize(
     ("task", "observation", "expected_sentence"),
     [
@@ -245,7 +337,7 @@ def test_overcooked_config_exact_values_and_task_zero_schedule():
     assert config.include_preview_reward is True
     assert config.max_iterations == 1000
     assert config.max_depth == 15
-    assert config.selection_temperature == 0.75
+    assert config.selection_temperature == 1.0
     assert config.selection_schedule.always_sample_before == 50
     assert config.selection_schedule.probabilistic_sample_before == 100
     assert config.selection_schedule.sample_probability == 0.2
@@ -262,7 +354,7 @@ def test_task_three_config_is_greedy_and_disables_curiosity():
     assert config.selection_schedule.sample_probability_at(0) == 0.0
     assert config.max_iterations == 7
     assert config.max_depth == 4
-    assert config.selection_temperature == 1.5
+    assert config.selection_temperature == 1.0
 
 
 def test_overcooked_config_defaults_selection_temperature_to_one():
@@ -350,12 +442,36 @@ def test_clone_and_preview_do_not_mutate_original_state():
 
     np.testing.assert_array_equal(state.observation, state_before.observation)
     assert state.runtime.envs[0].step_count == 0
-    assert result.state.runtime is cloned.runtime
+    assert cloned.runtime.envs[0].step_count == 0
+    assert result.state.runtime is not cloned.runtime
     assert result.state.runtime.envs[0].step_count == 1
     assert result.reward == 0.25
     assert result.terminated is False
     assert result.truncated is False
     assert result.info["raw_info"] == [{"macro_action_steps": 1}]
+
+
+def test_preview_directly_clones_the_supplied_state_before_stepping():
+    env = FakeVectorEnv()
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+    supplied_observation = state.observation
+    supplied_runtime = state.runtime
+    before = copy.deepcopy(state)
+
+    result = adapter.preview(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert state.observation is supplied_observation
+    assert state.runtime is supplied_runtime
+    np.testing.assert_array_equal(state.observation, before.observation)
+    assert state.runtime.envs[0].step_count == 0
+    assert state.runtime.step_calls == []
+    assert result.state.runtime is not supplied_runtime
+    assert result.state.runtime.envs[0].step_count == 1
 
 
 def test_chop_failure_returns_pre_step_snapshot_and_penalty():
@@ -375,6 +491,8 @@ def test_chop_failure_returns_pre_step_snapshot_and_penalty():
     assert result.reward == -0.001
     assert result.terminated is False
     assert result.truncated is False
+    assert result.state.runtime._planu_terminated is False
+    assert adapter.is_terminal(result.state) is False
     assert len(env.step_calls) == 1
 
 
@@ -390,6 +508,8 @@ def test_chop_success_uses_actual_transition_and_non_chop_does_not_draw():
     assert chop_result.state.runtime.envs[0].step_count == 1
     assert chop_result.reward == 0.75
     assert chop_result.terminated is True
+    assert chop_result.state.runtime._planu_terminated is True
+    assert adapter.is_terminal(chop_result.state) is True
 
     non_chop = adapter.actions(chop_result.state)[0]
     adapter.step(chop_result.state, non_chop, rng)
@@ -425,6 +545,42 @@ def test_state_key_includes_runtime_step_count_without_identity():
     assert adapter.state_key(first) == adapter.state_key(adapter.clone(first))
 
 
+def test_state_key_scans_env_step_and_elapsed_steps_at_all_runtime_levels():
+    class UnwrappedEnv:
+        def __init__(self):
+            self.env_step = 0
+
+    class WrappedEnv:
+        def __init__(self):
+            self._elapsed_steps = 0
+            self.unwrapped = UnwrappedEnv()
+
+    env = FakeVectorEnv()
+    env.env_step = 0
+    env.envs = [WrappedEnv()]
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    observation = np.array(TASK_0_INITIAL, copy=True)
+
+    baseline = EnvironmentState(observation, copy.deepcopy(env))
+    wrapper_changed = EnvironmentState(observation, copy.deepcopy(env))
+    wrapper_changed.runtime.env_step = 1
+    inner_changed = EnvironmentState(observation, copy.deepcopy(env))
+    inner_changed.runtime.envs[0]._elapsed_steps = 1
+    unwrapped_changed = EnvironmentState(observation, copy.deepcopy(env))
+    unwrapped_changed.runtime.envs[0].unwrapped.env_step = 1
+
+    keys = {
+        adapter.state_key(state)
+        for state in (
+            baseline,
+            wrapper_changed,
+            inner_changed,
+            unwrapped_changed,
+        )
+    }
+    assert len(keys) == 4
+
+
 def test_is_terminal_defaults_false_and_reads_explicit_runtime_state():
     adapter = OvercookedAdapter(
         FakeVectorEnv(),
@@ -437,6 +593,22 @@ def test_is_terminal_defaults_false_and_reads_explicit_runtime_state():
 
     state.runtime.envs[0].terminated = True
     assert adapter.is_terminal(state) is True
+
+
+def test_preview_persists_done_as_private_runtime_terminal_marker():
+    env = FakeVectorEnv(done=True)
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.preview(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is True
+    assert result.state.runtime._planu_terminated is True
+    assert adapter.is_terminal(result.state) is True
 
 
 def test_nonfinite_vector_reward_is_rejected():
@@ -474,6 +646,14 @@ def test_scorer_module_imports_without_optional_ml_dependencies():
 
     assert hasattr(module, "OvercookedActionScorer")
     assert hasattr(module, "normalize_action_scores")
+
+
+def test_scorer_module_reexports_shared_search_types():
+    module = importlib.import_module("mcts.overcooked.PlanU_mcts")
+
+    assert module.ActionNode is ActionNode
+    assert module.LanguageNode is LanguageNode
+    assert module.PlanUSearch is PlanUSearch
 
 
 def test_scorer_module_defines_no_search_algorithm_classes():
@@ -658,6 +838,44 @@ def test_cli_parser_imports_without_gym_and_parses_boolean_strings():
     assert args.rnd is False
     assert args.init_dist is False
     assert args.transpositions is True
+
+
+def test_cli_temperature_only_configures_action_scorer(monkeypatch):
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    args = inference.parse_args(["--temperature", "0.37"])
+    calls = {}
+
+    class RecordingScorer:
+        def __init__(self, *args, **kwargs):
+            calls["scorer_temperature"] = kwargs["temperature"]
+
+    class RecordingAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class RecordingSearch:
+        def __init__(self, adapter, scorer, config, curiosity):
+            calls["search"] = (adapter, scorer, config, curiosity)
+
+    def recording_config(**kwargs):
+        calls["config_kwargs"] = kwargs
+        return types.SimpleNamespace(selection_temperature=1.0)
+
+    monkeypatch.setattr(inference, "OvercookedActionScorer", RecordingScorer)
+    monkeypatch.setattr(inference, "OvercookedAdapter", RecordingAdapter)
+    monkeypatch.setattr(inference, "PlanUSearch", RecordingSearch)
+    monkeypatch.setattr(inference, "overcooked_config", recording_config)
+
+    _, _, config = inference.build_planu_components(
+        args,
+        envs=object(),
+        device="cpu",
+        rnd_writer=object(),
+    )
+
+    assert calls["scorer_temperature"] == 0.37
+    assert "temperature" not in calls["config_kwargs"]
+    assert config.selection_temperature == 1.0
 
 
 def test_cli_rejects_multiple_envs_and_init_distribution():

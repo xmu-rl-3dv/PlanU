@@ -517,7 +517,13 @@ def _stable_value(value: Any) -> Any:
 def _runtime_step_signature(runtime: Any) -> Tuple[Any, ...]:
     signature = []
     for path, current in _runtime_objects(runtime):
-        for name in ("steps", "step_count", "_step_count"):
+        for name in (
+            "steps",
+            "step_count",
+            "_step_count",
+            "env_step",
+            "_elapsed_steps",
+        ):
             if hasattr(current, name):
                 signature.append(
                     (path, name, _stable_value(getattr(current, name)))
@@ -617,17 +623,20 @@ class OvercookedAdapter:
         rng: np.random.Generator,
     ) -> TransitionResult:
         del rng
-        observation, reward, done, info = state.runtime.step(
+        preview_state = self.clone(state)
+        observation, reward, done, info = preview_state.runtime.step(
             np.array([action.payload])
         )
+        terminated = _scalar_bool(done, "done")
+        preview_state.runtime._planu_terminated = terminated
         next_state = EnvironmentState(
             observation=np.asarray(observation).copy(),
-            runtime=state.runtime,
+            runtime=preview_state.runtime,
         )
         return TransitionResult(
             state=next_state,
             reward=_scalar_reward(reward),
-            terminated=_scalar_bool(done, "done"),
+            terminated=terminated,
             truncated=False,
             info={"raw_info": info},
         )
@@ -642,10 +651,12 @@ class OvercookedAdapter:
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])
         )
+        terminated = _scalar_bool(done, "done")
         if (
             "chop" in action.text
             and rng.random() < self.stochastic_probability
         ):
+            before.runtime._planu_terminated = False
             return TransitionResult(
                 state=before,
                 reward=-0.001,
@@ -653,13 +664,14 @@ class OvercookedAdapter:
                 truncated=False,
                 info={"raw_info": info},
             )
+        state.runtime._planu_terminated = terminated
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
                 runtime=state.runtime,
             ),
             reward=_scalar_reward(reward),
-            terminated=_scalar_bool(done, "done"),
+            terminated=terminated,
             truncated=False,
             info={"raw_info": info},
         )
@@ -672,7 +684,13 @@ class OvercookedAdapter:
 
     def is_terminal(self, state: EnvironmentState) -> bool:
         for _, runtime in _runtime_objects(state.runtime):
-            for name in ("terminated", "_terminated", "done", "_done"):
+            for name in (
+                "_planu_terminated",
+                "terminated",
+                "_terminated",
+                "done",
+                "_done",
+            ):
                 if hasattr(runtime, name):
                     value = np.asarray(getattr(runtime, name)).reshape(-1)
                     if value.size and bool(value[0]):
@@ -688,6 +706,7 @@ def overcooked_config(
     temperature: float = 1.0,
 ) -> PlanUConfig:
     _validate_task(task)
+    del temperature
     if task == 0:
         schedule = SelectionSchedule(
             always_sample_before=50,
@@ -702,6 +721,6 @@ def overcooked_config(
         include_preview_reward=True,
         max_iterations=max_iterations,
         max_depth=max_depth,
-        selection_temperature=temperature,
+        selection_temperature=1.0,
         selection_schedule=schedule,
     )

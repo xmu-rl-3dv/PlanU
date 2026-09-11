@@ -4,6 +4,8 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from planu_core.interfaces import ActionCandidate
+from planu_core.nodes import ActionNode, LanguageNode
+from planu_core.search import PlanUSearch
 
 
 LEGACY_BASE_MODEL = "Neko-Institute-of-Science/LLaMA-7B-HF"
@@ -178,4 +180,10 @@ class OvercookedActionScorer:
         )
 
 
-__all__ = ["OvercookedActionScorer", "normalize_action_scores"]
+__all__ = [
+    "ActionNode",
+    "LanguageNode",
+    "OvercookedActionScorer",
+    "PlanUSearch",
+    "normalize_action_scores",
+]
