@@ -1,3 +1,4 @@
+from .backup import backup_trajectory, suffix_returns
 from .config import PlanUConfig, SelectionSchedule
 from .distribution import QuantileDistribution
 from .interfaces import (
@@ -23,5 +24,7 @@ __all__ = [
     "QuantileDistribution",
     "SelectionSchedule",
     "TransitionResult",
+    "backup_trajectory",
     "select_action",
+    "suffix_returns",
 ]
