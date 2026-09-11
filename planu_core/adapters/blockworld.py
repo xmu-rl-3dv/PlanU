@@ -221,18 +221,22 @@ class BlockWorldAdapter:
 
         reward_kwargs = dict(action.metadata["fast_reward_details"])
         reward_kwargs.update(aux)
+        node_view = action.metadata["node_view"]
         raw_reward = self.search_config.reward(
-            action.metadata["node_view"],
+            node_view,
             action.payload,
             **reward_kwargs
         )
         reward, raw_details = _result_pair(raw_reward, "reward")
         details = _copied_mapping(raw_details, "reward")
+        scalar_reward = _scalar_finite(reward, "reward")
+        node_view.cum_rewards.append(scalar_reward)
         info = dict(details)
         info.update(aux)
+        info["node_view"] = node_view
         return TransitionResult(
             state=EnvironmentState(next_observation, None),
-            reward=_scalar_finite(reward, "reward"),
+            reward=scalar_reward,
             terminated=bool(self.world_model.is_terminal(next_observation)),
             truncated=False,
             info=info,

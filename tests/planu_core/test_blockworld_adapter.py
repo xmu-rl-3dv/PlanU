@@ -163,7 +163,12 @@ def test_step_forwards_fast_details_node_view_aux_and_supplied_rng():
     assert result.reward == 2.5
     assert result.terminated is True
     assert result.truncated is False
-    assert result.info == {"scored": True, "success": True}
+    assert result.info["node_view"] is node
+    assert {
+        key: value
+        for key, value in result.info.items()
+        if key != "node_view"
+    } == {"scored": True, "success": True}
 
 
 def test_step_supports_a_bare_state_result():
@@ -184,7 +189,112 @@ def test_step_supports_a_bare_state_result():
         "intuition": 0.2,
         "nested": ["original"],
     }
-    assert result.info == {"scored": True}
+    assert result.info["node_view"] is action.metadata["node_view"]
+    assert {
+        key: value
+        for key, value in result.info.items()
+        if key != "node_view"
+    } == {"scored": True}
+
+
+def test_repeated_steps_advance_reward_visit_count_after_each_reward():
+    class VisitRecordingConfig(RecordingSearchConfig):
+        def __init__(self):
+            super().__init__()
+            self.reward_visits = []
+
+        def reward(self, node, action, **kwargs):
+            self.reward_visits.append(len(node.cum_rewards))
+            return float(len(self.reward_visits)), {}
+
+    search_config = VisitRecordingConfig()
+    adapter = BlockWorldAdapter(FakeWorldModel(), search_config)
+    state = adapter.reset()
+    action = adapter.actions(state, state_visit_count=1)[0]
+
+    results = [
+        adapter.step(state, action, np.random.default_rng(seed))
+        for seed in range(3)
+    ]
+
+    assert search_config.reward_visits == [0, 1, 2]
+    assert action.metadata["node_view"].cum_rewards == [1.0, 2.0, 3.0]
+    assert all(
+        result.info["node_view"] is action.metadata["node_view"]
+        for result in results
+    )
+
+
+def test_different_actions_share_reward_visit_count():
+    class MultiActionConfig(RecordingSearchConfig):
+        def __init__(self):
+            super().__init__()
+            self.reward_visits = []
+
+        def get_actions(self, state):
+            return ["move", "stack"]
+
+        def reward(self, node, action, **kwargs):
+            self.reward_visits.append((action, len(node.cum_rewards)))
+            return 1.0, {}
+
+    search_config = MultiActionConfig()
+    adapter = BlockWorldAdapter(FakeWorldModel(), search_config)
+    state = adapter.reset()
+    first, second = adapter.actions(state, state_visit_count=1)
+
+    adapter.step(state, first, np.random.default_rng(1))
+    adapter.step(state, second, np.random.default_rng(2))
+
+    assert first.metadata["node_view"] is second.metadata["node_view"]
+    assert search_config.reward_visits == [("move", 0), ("stack", 1)]
+    assert first.metadata["node_view"].cum_rewards == [1.0, 1.0]
+
+
+def test_failed_world_or_reward_call_does_not_advance_reward_visit_count():
+    class FailingWorld(FakeWorldModel):
+        def step(self, state, action):
+            raise RuntimeError("world failed")
+
+    class FailingRewardConfig(RecordingSearchConfig):
+        def reward(self, node, action, **kwargs):
+            raise RuntimeError("reward failed")
+
+    world_adapter = BlockWorldAdapter(
+        FailingWorld(),
+        RecordingSearchConfig(),
+    )
+    world_state = world_adapter.reset()
+    world_action = world_adapter.actions(
+        world_state,
+        state_visit_count=1,
+    )[0]
+
+    with pytest.raises(RuntimeError, match="world failed"):
+        world_adapter.step(
+            world_state,
+            world_action,
+            np.random.default_rng(1),
+        )
+    assert world_action.metadata["node_view"].cum_rewards == []
+
+    reward_adapter = BlockWorldAdapter(
+        FakeWorldModel(),
+        FailingRewardConfig(),
+    )
+    reward_state = reward_adapter.reset()
+    reward_action = reward_adapter.actions(
+        reward_state,
+        state_visit_count=1,
+    )[0]
+
+    with pytest.raises(RuntimeError, match="reward failed"):
+        reward_adapter.step(
+            reward_state,
+            reward_action,
+            np.random.default_rng(2),
+        )
+    assert reward_action.metadata["node_view"].cum_rewards == []
 
 
 @pytest.mark.parametrize(
@@ -210,6 +320,7 @@ def test_step_validates_reward_result_shape_and_finiteness(
 
     with pytest.raises(ValueError, match=message):
         adapter.step(state, action, np.random.default_rng(5))
+    assert action.metadata["node_view"].cum_rewards == []
 
 
 @dataclass
@@ -314,7 +425,7 @@ def test_repeated_action_accumulates_success_and_failure_outcomes():
 
     assert first.final_observation.blocks_state == "success"
     assert second.final_observation.blocks_state == "failure"
-    assert len(search_config.fast_nodes[0].cum_rewards) == 0
+    assert search_config.fast_nodes[0].cum_rewards == [1.0, 0.0]
     action_node = search.root.children["move"]
     assert set(action_node.children) == {
         adapter.state_key(
@@ -471,7 +582,7 @@ def test_blockworld_wrapper_executes_shared_search_and_returns_best_trace(
     assert result.aggregated_result is None
     assert len(set(world.rng_ids)) == 1
     assert len(result.tree_state.children["move"].children) == 2
-    assert len(search_config.fast_nodes[0].cum_rewards) == 0
+    assert search_config.fast_nodes[0].cum_rewards == [-1.0, 4.0]
 
 
 def test_blockworld_wrapper_uses_best_nonterminal_and_handles_empty_path(
@@ -638,6 +749,64 @@ def test_evaluate_cli_compiles_and_has_reachable_seeded_planu_branch():
         "chain_propagate",
     } & set(keywords)
     assert "MCTS(" in ast.unparse(branch.body)
+
+
+def test_evaluate_entrypoint_imports_without_a_deepseek_model(monkeypatch):
+    reasoners = types.ModuleType("reasoners")
+    reasoners.__path__ = []
+    reasoners.LanguageModel = object
+    reasoners.Reasoner = object
+    reasoners.SearchConfig = object
+    reasoners.WorldModel = object
+
+    algorithm = types.ModuleType("reasoners.algorithm")
+    algorithm.MCTS = object
+    algorithm.PlanU = object
+
+    benchmark = types.ModuleType("reasoners.benchmark")
+    benchmark.__path__ = []
+    benchmark.BWEvaluator = object
+    bw_utils = types.ModuleType("reasoners.benchmark.bw_utils")
+
+    lm = types.ModuleType("reasoners.lm")
+    lm.ExLlamaModel = object
+    lm.HFModel = object
+
+    torch = types.ModuleType("torch")
+
+    monkeypatch.setitem(sys.modules, "reasoners", reasoners)
+    monkeypatch.setitem(sys.modules, "reasoners.algorithm", algorithm)
+    monkeypatch.setitem(sys.modules, "reasoners.benchmark", benchmark)
+    monkeypatch.setitem(
+        sys.modules,
+        "reasoners.benchmark.bw_utils",
+        bw_utils,
+    )
+    monkeypatch.setitem(sys.modules, "reasoners.lm", lm)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    module_name = "_blockworld_evaluate_stochastic_import_test"
+    spec = importlib.util.spec_from_file_location(module_name, EVALUATE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(EVALUATE_PATH),
+            "--algorithm",
+            "planu",
+            "--gpu",
+            "0",
+            "--version",
+            "2",
+            "--steps",
+            "2",
+        ],
+    )
+    assert module.parse_args().algorithm == "planu"
 
 
 def test_evaluate_reward_keeps_fast_prior_and_includes_first_goal_reward():
