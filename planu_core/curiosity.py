@@ -1,6 +1,12 @@
 import math
 from numbers import Integral
-from typing import Any
+from typing import Any, Callable, Optional
+
+
+def _default_observation_converter(observation: Any) -> Any:
+    import torch
+
+    return torch.as_tensor(observation, dtype=torch.float32).reshape(-1)
 
 
 class NullCuriosity:
@@ -17,7 +23,12 @@ class NullCuriosity:
 
 
 class RndCuriosity:
-    def __init__(self, model: Any, minimum_samples: int = 15) -> None:
+    def __init__(
+        self,
+        model: Any,
+        minimum_samples: int = 15,
+        observation_converter: Optional[Callable[[Any], Any]] = None,
+    ) -> None:
         if isinstance(minimum_samples, bool) or not isinstance(
             minimum_samples,
             Integral,
@@ -25,8 +36,15 @@ class RndCuriosity:
             raise TypeError("minimum_samples must be an integer")
         if minimum_samples < 0:
             raise ValueError("minimum_samples must be nonnegative")
+        if observation_converter is not None and not callable(observation_converter):
+            raise TypeError("observation_converter must be callable")
         self.model = model
         self.minimum_samples = int(minimum_samples)
+        self.observation_converter = (
+            _default_observation_converter
+            if observation_converter is None
+            else observation_converter
+        )
         self.sample_count = 0
 
     @property
@@ -48,7 +66,8 @@ class RndCuriosity:
         return score
 
     def observe(self, observation: Any) -> None:
-        self.model.collect_data(observation)
+        converted_observation = self.observation_converter(observation)
+        self.model.collect_data(converted_observation)
         self.sample_count += 1
 
     def train(self) -> Any:

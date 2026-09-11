@@ -1,6 +1,7 @@
-import ast
+import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -162,9 +163,18 @@ def test_rnd_curiosity_rejects_negative_minimum_samples():
         RndCuriosity(FakeModel(), -1)
 
 
+def test_rnd_curiosity_rejects_noncallable_observation_converter():
+    with pytest.raises(TypeError, match="observation_converter must be callable"):
+        RndCuriosity(FakeModel(), observation_converter=object())
+
+
 def test_rnd_curiosity_is_ready_only_after_exceeding_minimum_samples():
     model = FakeModel()
-    curiosity = RndCuriosity(model, minimum_samples=2)
+    curiosity = RndCuriosity(
+        model,
+        minimum_samples=2,
+        observation_converter=lambda observation: observation,
+    )
 
     assert curiosity.sample_count == 0
     assert curiosity.ready_to_train is False
@@ -182,13 +192,64 @@ def test_rnd_curiosity_is_ready_only_after_exceeding_minimum_samples():
 def test_rnd_curiosity_increments_count_only_after_successful_collection():
     error = RuntimeError("collection failed")
     model = FakeModel(collect_error=error)
-    curiosity = RndCuriosity(model, minimum_samples=0)
+    curiosity = RndCuriosity(
+        model,
+        minimum_samples=0,
+        observation_converter=lambda observation: observation,
+    )
 
     with pytest.raises(RuntimeError, match="collection failed"):
         curiosity.observe("state")
 
     assert curiosity.sample_count == 0
     assert curiosity.ready_to_train is False
+
+
+def test_rnd_curiosity_default_converter_lazily_flattens_with_torch(monkeypatch):
+    observation = np.array([[1.0, 2.0, 3.0]])
+    calls = []
+
+    class TensorSentinel:
+        def reshape(self, *shape):
+            calls.append(("reshape", shape))
+            return self
+
+    tensor = TensorSentinel()
+    fake_torch = types.ModuleType("torch")
+    fake_torch.float32 = object()
+
+    def as_tensor(value, dtype):
+        calls.append(("as_tensor", value, dtype))
+        return tensor
+
+    fake_torch.as_tensor = as_tensor
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    model = FakeModel()
+    curiosity = RndCuriosity(model)
+
+    curiosity.observe(observation)
+
+    assert calls[0][0] == "as_tensor"
+    assert calls[0][1] is observation
+    assert calls[0][2] is fake_torch.float32
+    assert calls[1] == ("reshape", (-1,))
+    assert model.collected == [tensor]
+    assert curiosity.sample_count == 1
+
+
+def test_rnd_curiosity_converter_failure_does_not_collect_or_increment():
+    model = FakeModel()
+
+    def fail_conversion(observation):
+        raise RuntimeError("conversion failed")
+
+    curiosity = RndCuriosity(model, observation_converter=fail_conversion)
+
+    with pytest.raises(RuntimeError, match="conversion failed"):
+        curiosity.observe(np.array([[1.0, 2.0]]))
+
+    assert model.collected == []
+    assert curiosity.sample_count == 0
 
 
 def test_rnd_curiosity_converts_numeric_score_to_float():
@@ -408,27 +469,56 @@ def test_importing_planu_core_does_not_load_torch_or_ding():
     ],
 )
 def test_compatibility_modules_reexport_their_public_names(
+    tmp_path,
     relative_path,
     module,
     names,
 ):
-    source = Path(relative_path).read_text()
-    tree = ast.parse(source)
-    imports = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom) and node.module == module
-    ]
-    exports = [
-        ast.literal_eval(node.value)
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "__all__"
-            for target in node.targets
-        )
-    ]
+    benchmark_dir = Path(relative_path).resolve().parent
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(benchmark_dir)
+    env["COMMON_MODULE"] = module
+    env["PUBLIC_NAMES"] = ",".join(names)
+    env["WRAPPER_MODULE"] = Path(relative_path).stem
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import os
+import sys
+import types
+from pathlib import Path
 
-    assert len(imports) == 1
-    assert [alias.name for alias in imports[0].names] == names
-    assert exports == [names]
+benchmark_dir = Path(os.environ["PYTHONPATH"]).resolve()
+repository_root = benchmark_dir.parents[1]
+assert str(repository_root) not in sys.path, sys.path
+
+package = types.ModuleType("planu_core")
+package.__path__ = []
+sys.modules["planu_core"] = package
+
+common_module_name = os.environ["COMMON_MODULE"]
+common_module = types.ModuleType(common_module_name)
+public_names = os.environ["PUBLIC_NAMES"].split(",")
+for name in public_names:
+    setattr(common_module, name, object())
+sys.modules[common_module_name] = common_module
+
+wrapper = importlib.import_module(os.environ["WRAPPER_MODULE"])
+
+assert sys.path[0] == str(repository_root), sys.path
+assert wrapper.__all__ == public_names
+for name in public_names:
+    assert getattr(wrapper, name) is getattr(common_module, name)
+""",
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
