@@ -1,5 +1,6 @@
 from .backup import backup_trajectory, suffix_returns
 from .config import PlanUConfig, SelectionSchedule
+from .curiosity import NullCuriosity, RndCuriosity
 from .distribution import QuantileDistribution
 from .interfaces import (
     ActionCandidate,
@@ -21,9 +22,11 @@ __all__ = [
     "EnvironmentAdapter",
     "EnvironmentState",
     "LanguageNode",
+    "NullCuriosity",
     "PlanUConfig",
     "PlanUSearch",
     "QuantileDistribution",
+    "RndCuriosity",
     "SelectionSchedule",
     "TrajectoryResult",
     "TransitionResult",

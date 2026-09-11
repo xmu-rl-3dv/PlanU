@@ -8,8 +8,14 @@ import numpy as np
 
 from .backup import backup_trajectory
 from .config import PlanUConfig
+from .curiosity import NullCuriosity
 from .distribution import QuantileDistribution
-from .interfaces import ActionScorer, EnvironmentAdapter, EnvironmentState
+from .interfaces import (
+    ActionScorer,
+    CuriosityProvider,
+    EnvironmentAdapter,
+    EnvironmentState,
+)
 from .nodes import ActionNode, LanguageNode
 from .selection import select_action
 
@@ -108,10 +114,12 @@ class PlanUSearch:
         adapter: EnvironmentAdapter,
         scorer: ActionScorer,
         config: PlanUConfig,
+        curiosity: Optional[CuriosityProvider] = None,
     ):
         self.adapter = adapter
         self.scorer = scorer
         self.config = config
+        self.curiosity = NullCuriosity() if curiosity is None else curiosity
         self.root: Optional[LanguageNode] = None
 
     def _ensure_root(self, state: EnvironmentState) -> LanguageNode:
@@ -195,7 +203,7 @@ class PlanUSearch:
         root_before = self.root
         journal = _MutationJournal()
         try:
-            return self._run_iteration(
+            result, executed_observations = self._run_iteration(
                 iteration,
                 rng,
                 reset_seed,
@@ -205,6 +213,12 @@ class PlanUSearch:
             journal.rollback()
             self.root = root_before
             raise
+        # Curiosity is external learner state; failures here do not roll back
+        # the tree transaction already committed by a successful backup.
+        for observation in executed_observations:
+            self.curiosity.observe(observation)
+        self.curiosity.train()
+        return result
 
     def _run_iteration(
         self,
@@ -212,7 +226,7 @@ class PlanUSearch:
         rng: np.random.Generator,
         reset_seed: Optional[int],
         journal: _MutationJournal,
-    ) -> TrajectoryResult:
+    ) -> Tuple[TrajectoryResult, List[Any]]:
         state = self.adapter.reset(reset_seed)
         node = self._ensure_root(state)
         if self.adapter.is_terminal(state):
@@ -220,21 +234,25 @@ class PlanUSearch:
             node.terminated = True
             final_observation = copy.deepcopy(state.observation)
             backup_trajectory([], [], self.config)
-            return TrajectoryResult(
-                actions=[],
-                rewards=[],
-                terminated=True,
-                truncated=False,
-                final_observation=final_observation,
-                selection_scores=[],
-                action_path=[],
-                state_path=[node],
+            return (
+                TrajectoryResult(
+                    actions=[],
+                    rewards=[],
+                    terminated=True,
+                    truncated=False,
+                    final_observation=final_observation,
+                    selection_scores=[],
+                    action_path=[],
+                    state_path=[node],
+                ),
+                [],
             )
 
         action_path = []
         state_path = [node]
         actions = []
         rewards = []
+        executed_observations = []
         score_history = []
         terminated = False
         truncated = False
@@ -247,11 +265,16 @@ class PlanUSearch:
                 node.truncated = True
                 truncated = True
                 break
+            novelty = {
+                key: self.curiosity.score(action.preview_state)
+                for key, action in node.children.items()
+            }
             action_node, scores = select_action(
                 node,
                 self.config,
                 iteration,
                 rng,
+                novelty,
             )
             result = self.adapter.step(state, action_node.action, rng)
             try:
@@ -282,6 +305,7 @@ class PlanUSearch:
             action_path.append(action_node)
             actions.append(action_node.action.key)
             rewards.append(reward)
+            executed_observations.append(copy.deepcopy(next_observation))
             score_history.append(scores)
             state = result.state
             node = next_node
@@ -295,13 +319,16 @@ class PlanUSearch:
 
         final_observation = copy.deepcopy(state.observation)
         backup_trajectory(action_path, rewards, self.config)
-        return TrajectoryResult(
-            actions=actions,
-            rewards=rewards,
-            terminated=terminated,
-            truncated=truncated,
-            final_observation=final_observation,
-            selection_scores=score_history,
-            action_path=action_path,
-            state_path=state_path,
+        return (
+            TrajectoryResult(
+                actions=actions,
+                rewards=rewards,
+                terminated=terminated,
+                truncated=truncated,
+                final_observation=final_observation,
+                selection_scores=score_history,
+                action_path=action_path,
+                state_path=state_path,
+            ),
+            executed_observations,
         )
