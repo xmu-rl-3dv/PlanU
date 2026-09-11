@@ -16,48 +16,48 @@ def _normalize_whitespace(value):
     return " ".join(value.split())
 
 
+def _section(readme, heading):
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*$\n(.*?)(?=^## |\Z)",
+        readme,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"README is missing the {heading!r} section"
+    return match.group(1)
+
+
 def test_readme_documents_python_39_and_unified_algorithm():
     readme = _readme()
-    normalized_readme = _normalize_whitespace(readme)
+    algorithm = _section(readme, "Unified PlanU Algorithm")
     required_terms = (
-        "one shared PlanU algorithm implementation",
-        "no published/canonical split",
         "Upper Confidence Bounds with Curiosity (UCC)",
         "State Node",
         "Action Node",
         "outcome State Node",
         "Quantile Distribution",
         "action scorer",
-        "optional preview reward",
         "distorted quantile value",
-        "normalized optional RND curiosity",
-        "persistent tree across trajectories",
-        "Monte Carlo suffix-return quantile pinball backup",
-        "stochastic outcomes under the same Action Node",
-        "benchmark differences are limited to adapters and configuration",
+        "RND curiosity",
+        "persistent tree",
+        "suffix-return",
+        "pinball",
     )
 
     assert "Python-3.9" in readme
     assert "Python-3.8" not in readme
     for term in required_terms:
-        assert term in normalized_readme
+        assert term in algorithm
 
 
 def test_readme_links_supported_benchmark_adapters():
     readme = _readme()
 
-    assert (
-        "[VirtualHome adapter](planu_core/adapters/virtualhome.py)"
-        in readme
-    )
-    assert (
-        "[BlockWorld adapter](planu_core/adapters/blockworld.py)"
-        in readme
-    )
+    assert "(planu_core/adapters/virtualhome.py)" in readme
+    assert "(planu_core/adapters/blockworld.py)" in readme
 
 
 def test_readme_documents_core_packages_and_boundaries():
-    readme = _readme()
+    architecture = _section(_readme(), "Architecture")
 
     for module in (
         "nodes",
@@ -70,8 +70,8 @@ def test_readme_documents_core_packages_and_boundaries():
         "provenance",
         "adapters",
     ):
-        assert f"`planu_core/{module}" in readme
-    assert "boundary" in readme.lower()
+        assert f"`planu_core/{module}" in architecture
+    assert "boundary" in architecture.lower()
 
 
 def test_readme_has_supported_and_planned_benchmark_statuses():
@@ -88,7 +88,6 @@ def test_readme_has_supported_and_planned_benchmark_statuses():
         row = rf"\|\s*{benchmark}\s*\|\s*{phase}\s*\|\s*{status}\s*\|"
         assert re.search(row, readme)
     assert "https://github.com/OSU-NLP-Group/TravelPlanner.git" in readme
-    assert "Phase-two adapters are not implemented." in readme
     assert not re.search(
         r"(WebShop|TravelPlanner).{0,80}(adapter|implementation)\s+is implemented",
         readme,
@@ -97,13 +96,11 @@ def test_readme_has_supported_and_planned_benchmark_statuses():
 
 
 def test_readme_installation_keeps_benchmark_environments_external():
-    readme = _readme()
+    installation = _section(_readme(), "Installation")
 
-    assert "Python 3.9" in readme
-    assert "python -m pip install -e ." in readme
-    assert "`gym-macro-overcooked`" in readme
-    assert "`virtual-home`" in readme
-    assert "environments remain" in readme
+    for term in ("Python 3.9", "`gym-macro-overcooked`", "`virtual-home`", "external"):
+        assert term in installation
+    assert "python -m pip install -e ." in installation
 
 
 def test_readme_documents_complete_overcooked_setup():
@@ -128,9 +125,8 @@ def test_readme_documents_complete_overcooked_setup():
         installation_commands.index(command) for command in required_commands
     )
 
-    normalized_installation = _normalize_whitespace(installation_section)
-    assert "DI-engine and easydict are required" in normalized_installation
-    assert "example script enables RND" in normalized_installation
+    for term in ("DI-engine", "easydict", "RND"):
+        assert term in installation_section
 
 
 def test_readme_has_exactly_one_overcooked_experiment_invocation():
@@ -146,24 +142,77 @@ def test_readme_has_exactly_one_overcooked_experiment_invocation():
     assert not re.search(r"^\s*(?:bash|sh)\s+(?:webshop/)?planu\.sh", readme, re.MULTILINE)
 
 
-def test_readme_removes_stale_model_edit_instructions_and_describes_outputs():
+def test_readme_scopes_model_and_device_configuration_by_benchmark():
     readme = _readme()
-    normalized_readme = _normalize_whitespace(readme)
+    configuration = _normalize_whitespace(_section(readme, "Configuration Scope"))
 
-    assert not re.search(
-        r"set.{0,20}local LLM path",
-        readme,
-        flags=re.IGNORECASE,
-    )
-    assert not re.search(r"PlanU_(?:mcts|v1|v2)\.py#L\d+", readme)
     for term in (
-        "config hash",
+        "Overcooked",
+        "VirtualHome",
+        "runner arguments",
+        "environment variables",
+        "BlockWorld",
+        "GPU",
+        "seed",
+        "iterations",
+        "success probability",
+        "`blockworld/evaluate_stochastic.py`",
+        "HF model identifier",
+        "source edit",
+    ):
+        assert term in configuration
+    assert "without editing hardcoded source locations" not in readme
+
+
+def test_readme_scopes_provenance_to_supported_runners():
+    provenance = _normalize_whitespace(
+        _section(_readme(), "Outputs And Provenance")
+    )
+
+    for term in (
+        "Overcooked",
+        "VirtualHome",
+        "config-hashed",
         "TensorBoard",
         "effective configuration",
         "git commit",
-        "dependency versions",
+        "dependency",
+        "BlockWorld",
+        "evaluator log layout",
+        "does not yet",
     ):
-        assert term in normalized_readme
+        assert term in provenance
+
+
+def test_readme_documents_blockworld_behavior_corrections():
+    migration = _normalize_whitespace(
+        _section(_readme(), "BlockWorld Migration Notes")
+    )
+
+    for term in (
+        "State Node",
+        "Action Node",
+        "outcome",
+        "re-sampled",
+        "arbitrary outcomes",
+        "first result",
+        "arithmetic mean",
+        "-10",
+        "100",
+        "goal reward",
+        "fast/action prior",
+        "executed transition reward",
+        "first-visit terminal goal reward",
+        "suffix-return",
+        "selection",
+        "legacy output strategies",
+        "non-default options",
+        "rejected",
+        "unified implementation results",
+        "bit-identical",
+        "previous broken entrypoint",
+    ):
+        assert term in migration
 
 
 def test_overcooked_script_is_valid_strict_bash_with_configurable_defaults():

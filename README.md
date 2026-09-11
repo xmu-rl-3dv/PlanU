@@ -30,6 +30,23 @@ there is no published/canonical split. The shared search follows these steps:
 The algorithm and its update rules are benchmark-independent; benchmark
 differences are limited to adapters and configuration.
 
+## BlockWorld Migration Notes
+
+BlockWorld now uses an alternating **State Node** / **Action Node** / outcome
+State Node tree. The transition is re-sampled on each action visit, preserving
+arbitrary outcomes instead of caching the first result.
+
+The risk-neutral quantile value is the arithmetic mean, and the default
+quantile range is `-10` to `100` so it covers the goal reward. The fast/action
+prior is separate from the executed transition reward, and the first-visit
+terminal goal reward is retained.
+
+BlockWorld uses the shared suffix-return update and selection. Unsupported
+legacy output strategies and non-default options are rejected rather than
+silently accepted. These corrections mean BlockWorld results should be reported
+as unified implementation results, not assumed bit-identical to the previous
+broken entrypoint.
+
 ## Architecture
 
 - `planu_core/nodes.py` and `planu_core/distribution.py` define tree ownership
@@ -81,8 +98,14 @@ The benchmark environments remain in `gym-macro-overcooked` and
 `virtual-home`; `planu_core` does not vendor or replace them. BlockWorld
 datasets, prompts, PDDL files, and planner binaries under `blockworld/examples`
 are external benchmark data and are not included in the Python distribution.
-Configure model and device choices through runner arguments or environment
-variables, without editing hardcoded source locations.
+
+## Configuration Scope
+
+Overcooked and VirtualHome model and device choices use runner arguments or
+environment variables. BlockWorld exposes GPU, seed, iterations, and success
+probability settings, but its current HF model identifier remains in
+`blockworld/evaluate_stochastic.py`; changing that identifier requires a source
+edit.
 
 ## Run Overcooked
 
@@ -102,10 +125,11 @@ not have unified-core execution instructions yet.
 
 ## Outputs And Provenance
 
-Run output directories include the effective config hash, so configurations do
-not silently share a result path. TensorBoard logs record the effective
-configuration and run metadata, including the git commit, Python version, and
-dependency versions.
+The Overcooked and VirtualHome runners use config-hashed result paths.
+Their TensorBoard logs record the effective configuration and run metadata,
+including the git commit, Python version, and dependency versions. BlockWorld
+uses its evaluator log layout and does not yet provide the same config-hashed
+TensorBoard provenance.
 
 ## Citation
 
