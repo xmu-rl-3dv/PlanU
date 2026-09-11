@@ -321,6 +321,44 @@ def test_search_observes_only_executed_states_in_order_then_trains_once():
     assert [int(observation[0]) for observation in curiosity.observed] == [1, 2]
 
 
+def test_search_scores_and_observes_but_does_not_train_when_disabled():
+    curiosity = RecordingCuriosity(scores={0: 0.0, 1: 2.0})
+    search = PlanUSearch(
+        NoveltyAdapter(),
+        FixedScorer(),
+        PlanUConfig(
+            curiosity_weight=0.2,
+            include_preview_reward=False,
+            max_depth=1,
+            train_curiosity=False,
+        ),
+        curiosity=curiosity,
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(7))
+
+    assert result.actions == ["right"]
+    assert curiosity.scored == [0, 1]
+    assert [int(observation[0]) for observation in curiosity.observed] == [1]
+    assert curiosity.train_calls == 0
+
+
+@pytest.mark.parametrize("adapter", [TerminalAdapter(), EmptyActionsAdapter()])
+def test_empty_trajectory_does_not_train_when_disabled(adapter):
+    curiosity = RecordingCuriosity()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(train_curiosity=False),
+        curiosity=curiosity,
+    )
+
+    search.run_iteration(0, np.random.default_rng(12))
+
+    assert curiosity.observed == []
+    assert curiosity.train_calls == 0
+
+
 def test_failed_backup_does_not_update_curiosity(monkeypatch):
     curiosity = RecordingCuriosity()
     search = PlanUSearch(

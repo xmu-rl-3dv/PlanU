@@ -334,6 +334,7 @@ def test_overcooked_config_exact_values_and_task_zero_schedule():
 
     assert config.quantile_learning_rate == 0.75
     assert config.curiosity_weight == 0.5
+    assert config.train_curiosity is True
     assert config.include_preview_reward is True
     assert config.max_iterations == 1000
     assert config.max_depth == 15
@@ -366,6 +367,18 @@ def test_overcooked_config_defaults_selection_temperature_to_one():
     )
 
     assert config.selection_temperature == 1.0
+
+
+def test_overcooked_config_forwards_distribution_initialization():
+    config = overcooked_config(
+        task=0,
+        rnd=False,
+        max_iterations=3,
+        max_depth=2,
+        init_distribution=True,
+    )
+
+    assert config.categorical_initialization is True
 
 
 def test_adapter_rejects_bad_task_probability_and_vector_count():
@@ -636,6 +649,21 @@ def test_is_terminal_defaults_false_and_reads_explicit_runtime_state():
 
     state.runtime.envs[0].terminated = True
     assert adapter.is_terminal(state) is True
+
+
+def test_is_truncated_defaults_false_and_reads_explicit_runtime_state():
+    adapter = OvercookedAdapter(
+        FakeVectorEnv(),
+        0,
+        0.0,
+        np.random.default_rng(1),
+    )
+    state = adapter.reset()
+
+    assert adapter.is_truncated(state) is False
+
+    state.runtime.envs[0].truncated = True
+    assert adapter.is_truncated(state) is True
 
 
 def test_preview_persists_done_as_private_runtime_terminal_marker():
@@ -1178,15 +1206,49 @@ def test_provenance_records_json_under_stable_tensorboard_tags():
     ]
 
 
-def test_cli_rejects_multiple_envs_and_init_distribution():
+def test_cli_rejects_multiple_envs_but_accepts_init_distribution():
     inference = importlib.import_module("mcts.overcooked.PlanU_inference")
 
     with pytest.raises(AssertionError, match="num_envs"):
         inference.validate_args(inference.parse_args(["--num-envs", "2"]))
-    with pytest.raises(NotImplementedError, match="init_dist"):
-        inference.validate_args(
-            inference.parse_args(["--num-envs", "1", "--init_dist", "True"])
-        )
+    inference.validate_args(
+        inference.parse_args(["--num-envs", "1", "--init_dist", "True"])
+    )
+
+
+def test_init_distribution_wires_config_and_prompt(monkeypatch):
+    inference = importlib.import_module("mcts.overcooked.PlanU_inference")
+    prompt = importlib.import_module("mcts.overcooked.prompt")
+    args = inference.parse_args(["--init_dist", "True"])
+    calls = {}
+
+    class RecordingScorer:
+        def __init__(self, *args, **kwargs):
+            calls["scorer_kwargs"] = kwargs
+
+    class RecordingAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class RecordingSearch:
+        def __init__(self, adapter, scorer, config, curiosity):
+            calls["config"] = config
+
+    monkeypatch.setattr(inference, "OvercookedActionScorer", RecordingScorer)
+    monkeypatch.setattr(inference, "OvercookedAdapter", RecordingAdapter)
+    monkeypatch.setattr(inference, "PlanUSearch", RecordingSearch)
+
+    inference.build_planu_components(
+        args,
+        envs=object(),
+        device="cpu",
+        rnd_writer=object(),
+    )
+
+    assert calls["config"].categorical_initialization is True
+    assert calls["scorer_kwargs"]["distribution_prompt"] == "".join(
+        prompt.DISTRIBUTION_PROMPT
+    )
 
 
 def test_existing_direct_script_command_can_parse_without_gym():

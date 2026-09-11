@@ -53,6 +53,9 @@ class FakeAdapter:
     def is_terminal(self, state):
         return state.runtime["position"] == 2
 
+    def is_truncated(self, state):
+        return False
+
     @staticmethod
     def _transition(state):
         state.runtime["position"] += 1

@@ -16,6 +16,7 @@ if _REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, _REPOSITORY_ROOT)
 
 from mcts.overcooked.PlanU_mcts import OvercookedActionScorer
+from mcts.overcooked.prompt import DISTRIBUTION_PROMPT
 from planu_core.adapters.overcooked import OvercookedAdapter, overcooked_config
 from planu_core.curiosity import RndCuriosity
 from planu_core.provenance import (
@@ -201,10 +202,6 @@ def parse_args(argv: Optional[Sequence[str]] = None):
 
 def validate_args(args) -> None:
     assert args.num_envs == 1, "num_envs must be exactly 1"
-    if args.init_dist:
-        raise NotImplementedError(
-            "init_dist=True is not supported by the unified scalar PlanU core"
-        )
 
 
 def make_env(
@@ -260,6 +257,7 @@ def build_planu_components(args, envs, device, rnd_writer, config=None):
         normalization_mode=args.normalization_mode,
         temperature=args.temperature,
         device=str(device),
+        distribution_prompt="".join(DISTRIBUTION_PROMPT),
     )
     adapter = OvercookedAdapter(
         envs,
@@ -273,6 +271,7 @@ def build_planu_components(args, envs, device, rnd_writer, config=None):
             rnd=args.rnd,
             max_iterations=args.maxiterations,
             max_depth=args.depth,
+            init_distribution=args.init_dist,
         )
     curiosity = (
         _build_curiosity(args, device, rnd_writer) if args.rnd else None
@@ -289,6 +288,7 @@ def run(args) -> None:
         rnd=args.rnd,
         max_iterations=args.maxiterations,
         max_depth=args.depth,
+        init_distribution=args.init_dist,
     )
     effective_config = _build_effective_config(args, config)
     config_hash = _config_hash(effective_config)

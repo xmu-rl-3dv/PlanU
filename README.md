@@ -134,8 +134,9 @@ not have unified-core execution instructions yet.
 The Overcooked and VirtualHome runners use config-hashed result paths.
 Their TensorBoard logs record the effective configuration and run metadata,
 including the git commit, Python version, and dependency versions. BlockWorld
-uses its evaluator log layout and does not yet provide the same config-hashed
-TensorBoard provenance.
+writes JSON provenance to a config-hashed evaluator path containing the seed.
+Each run stores `effective_config.json` and `run_metadata.json`, including the
+same git commit, Python version, and dependency version metadata.
 
 ## Citation
 

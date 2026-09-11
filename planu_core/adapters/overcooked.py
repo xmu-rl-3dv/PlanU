@@ -1,5 +1,6 @@
 import copy
 import math
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
@@ -548,6 +549,17 @@ def _scalar_bool(value: Any, name: str) -> bool:
     return bool(flattened[0])
 
 
+def _info_is_truncated(info: Any) -> bool:
+    values = info if isinstance(info, (list, tuple)) else (info,)
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for name in ("TimeLimit.truncated", "truncated"):
+            if name in value and _scalar_bool(value[name], name):
+                return True
+    return False
+
+
 class OvercookedAdapter:
     def __init__(
         self,
@@ -581,6 +593,7 @@ class OvercookedAdapter:
             except TypeError:
                 observation = self.envs.reset()
         self.envs._planu_terminated = False
+        self.envs._planu_truncated = False
         return EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=self.envs,
@@ -628,8 +641,10 @@ class OvercookedAdapter:
         observation, reward, done, info = preview_state.runtime.step(
             np.array([action.payload])
         )
-        terminated = _scalar_bool(done, "done")
+        truncated = _info_is_truncated(info)
+        terminated = _scalar_bool(done, "done") and not truncated
         preview_state.runtime._planu_terminated = terminated
+        preview_state.runtime._planu_truncated = truncated
         next_state = EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=preview_state.runtime,
@@ -638,7 +653,7 @@ class OvercookedAdapter:
             state=next_state,
             reward=_scalar_reward(reward),
             terminated=terminated,
-            truncated=False,
+            truncated=truncated,
             info={"raw_info": info},
         )
 
@@ -652,12 +667,14 @@ class OvercookedAdapter:
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])
         )
-        terminated = _scalar_bool(done, "done")
+        truncated = _info_is_truncated(info)
+        terminated = _scalar_bool(done, "done") and not truncated
         if (
             "chop" in action.text
             and rng.random() < self.stochastic_probability
         ):
             before.runtime._planu_terminated = False
+            before.runtime._planu_truncated = False
             return TransitionResult(
                 state=before,
                 reward=-0.001,
@@ -666,6 +683,7 @@ class OvercookedAdapter:
                 info={"raw_info": info},
             )
         state.runtime._planu_terminated = terminated
+        state.runtime._planu_truncated = truncated
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
@@ -673,7 +691,7 @@ class OvercookedAdapter:
             ),
             reward=_scalar_reward(reward),
             terminated=terminated,
-            truncated=False,
+            truncated=truncated,
             info={"raw_info": info},
         )
 
@@ -684,6 +702,8 @@ class OvercookedAdapter:
         return observation, _runtime_step_signature(state.runtime)
 
     def is_terminal(self, state: EnvironmentState) -> bool:
+        if self.is_truncated(state):
+            return False
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
                 "_planu_terminated",
@@ -698,6 +718,19 @@ class OvercookedAdapter:
                         return True
         return False
 
+    def is_truncated(self, state: EnvironmentState) -> bool:
+        for _, runtime in _runtime_objects(state.runtime):
+            for name in (
+                "_planu_truncated",
+                "truncated",
+                "_truncated",
+            ):
+                if hasattr(runtime, name):
+                    value = np.asarray(getattr(runtime, name)).reshape(-1)
+                    if value.size and bool(value[0]):
+                        return True
+        return False
+
 
 def overcooked_config(
     task: int,
@@ -705,6 +738,7 @@ def overcooked_config(
     max_iterations: int,
     max_depth: int,
     temperature: float = 1.0,
+    init_distribution: bool = False,
 ) -> PlanUConfig:
     _validate_task(task)
     del temperature
@@ -719,7 +753,9 @@ def overcooked_config(
     return PlanUConfig(
         quantile_learning_rate=0.75,
         curiosity_weight=0.5 if rnd else 0.0,
+        train_curiosity=True,
         include_preview_reward=True,
+        categorical_initialization=init_distribution,
         max_iterations=max_iterations,
         max_depth=max_depth,
         selection_temperature=1.0,

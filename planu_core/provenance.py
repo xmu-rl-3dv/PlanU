@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
@@ -19,10 +19,20 @@ PROVENANCE_DISTRIBUTIONS = {
 }
 
 
-def build_effective_config(args: Any, config: Any):
+def build_effective_config(
+    args: Any,
+    config: Any,
+    config_name: str = "planu_config",
+):
+    if is_dataclass(config):
+        serialized_config = asdict(config)
+    elif isinstance(config, Mapping):
+        serialized_config = dict(config)
+    else:
+        serialized_config = dict(vars(config))
     return {
         "args": dict(vars(args)),
-        "planu_config": asdict(config),
+        config_name: serialized_config,
     }
 
 
@@ -103,6 +113,23 @@ def record_run_provenance(
     )
 
 
+def write_json_provenance(
+    log_dir: Any,
+    effective_config: Mapping[str, Any],
+    run_metadata: Mapping[str, Any],
+) -> None:
+    directory = Path(log_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    for filename, payload in (
+        ("effective_config.json", effective_config),
+        ("run_metadata.json", run_metadata),
+    ):
+        (directory / filename).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
 __all__ = [
     "PROVENANCE_DISTRIBUTIONS",
     "build_effective_config",
@@ -111,4 +138,5 @@ __all__ = [
     "git_commit",
     "installed_versions",
     "record_run_provenance",
+    "write_json_provenance",
 ]

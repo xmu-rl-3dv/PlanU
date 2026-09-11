@@ -231,8 +231,10 @@ def test_readme_scopes_provenance_to_supported_runners():
         "git commit",
         "dependency",
         "BlockWorld",
-        "evaluator log layout",
-        "does not yet",
+        "JSON",
+        "config-hashed evaluator path",
+        "effective_config.json",
+        "run_metadata.json",
     ):
         assert term in provenance
 

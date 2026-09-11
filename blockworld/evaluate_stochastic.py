@@ -32,6 +32,12 @@ from reasoners.algorithm import MCTS, PlanU
 import reasoners.benchmark.bw_utils as utils
 from reasoners.benchmark import BWEvaluator
 from reasoners.lm import ExLlamaModel, HFModel
+from planu_core.provenance import (
+    build_effective_config,
+    build_run_metadata,
+    config_hash,
+    write_json_provenance,
+)
 import torch
 
 class NumpyEncoder(json.JSONEncoder):
@@ -81,6 +87,43 @@ def benchmark_paths(version: str, steps: str) -> tuple[str, str]:
         f"split_{version}/split_{version}_step_{steps}_data.json"
     )
     return prompt_path, data_path
+
+
+def _build_effective_run_config(
+    args,
+    algorithm_config,
+    model_identifier,
+    depth,
+):
+    effective_config = build_effective_config(
+        args,
+        algorithm_config,
+        config_name="{}_config".format(args.algorithm),
+    )
+    effective_config.update(
+        {
+            "model_identifier": model_identifier,
+            "depth": depth,
+            "success_probability": args.success_probability,
+        }
+    )
+    return effective_config
+
+
+def _build_log_dir(
+    args,
+    model_identifier,
+    effective_config_hash,
+    base_dir="logs",
+):
+    model_path = model_identifier.replace("/", "--")
+    return (
+        Path(base_dir)
+        / "v{}_{}".format(args.version, args.steps)
+        / "{}_{}".format(args.algorithm, model_path)
+        / "seed={}".format(args.seed)
+        / "config={}".format(effective_config_hash)
+    )
 
 
 BWAction = str
@@ -175,11 +218,12 @@ class BlocksWorldModelRAP(WorldModel):
         return self.rng.random() < self.success_probability
 
     def is_terminal(self, state: BWStateRAP) -> bool:
-        if utils.goal_check(utils.extract_goals(self.example), state.blocks_state)[0]:
-            return True
-        elif state.step_idx == self.max_steps:
-            return True
-        return False
+        return bool(
+            utils.goal_check(
+                utils.extract_goals(self.example),
+                state.blocks_state,
+            )[0]
+        )
 
 class BWConfigRAP(SearchConfig):
     def __init__(self,
@@ -372,6 +416,30 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid algorithm: {args.algorithm}")
 
+    if args.algorithm == "planu":
+        algorithm_config = algorithm.config
+    else:
+        algorithm_config = {
+            "depth_limit": depth_l,
+            "disable_tqdm": False,
+            "output_trace_in_each_iter": True,
+            "n_iters": args.n_iters,
+        }
+    effective_config = _build_effective_run_config(
+        args,
+        algorithm_config,
+        llama_path,
+        depth_l,
+    )
+    effective_config_hash = config_hash(effective_config)
+    run_metadata = build_run_metadata(repository_root=PLANU_ROOT)
+    log_dir = _build_log_dir(
+        args,
+        llama_path,
+        effective_config_hash,
+    )
+    write_json_provenance(log_dir, effective_config, run_metadata)
+
     reasoner_rap = Reasoner(world_model=world_model, search_config=config, search_algo=algorithm)
 
     evaluator = BWEvaluator(config_file='examples/CoT/blocksworld/data/bw_config.yaml',
@@ -386,7 +454,13 @@ if __name__ == "__main__":
     os.environ['QUANTILE_N'] = str(args.n_quantile)
     os.environ['SUCCESS_PROBABILITY'] = str(args.success_probability)
 
-    evaluator.evaluate(reasoner_rap, shuffle_prompt=True, num_shot=4, resume=0)
+    evaluator.evaluate(
+        reasoner_rap,
+        shuffle_prompt=True,
+        num_shot=4,
+        resume=0,
+        log_dir=os.fspath(log_dir),
+    )
 
 # nohup python evaluate_stochastic.py -a planu -g 1 -v 2 -s 2&
 # nohup python evaluate_stochastic.py -a mcts -g 0 -v 2 -s 2&

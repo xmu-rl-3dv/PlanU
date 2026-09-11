@@ -75,6 +75,9 @@ class EnvironmentAdapter(Protocol):
     def is_terminal(self, state: EnvironmentState) -> bool:
         ...
 
+    def is_truncated(self, state: EnvironmentState) -> bool:
+        ...
+
 
 class ActionScorer(Protocol):
     def score(
@@ -82,6 +85,16 @@ class ActionScorer(Protocol):
         observation: Any,
         actions: Sequence[ActionCandidate],
     ) -> Sequence[float]:
+        ...
+
+
+class DistributionScorer(Protocol):
+    def score_distributions(
+        self,
+        observation: Any,
+        candidates: Sequence[ActionCandidate],
+        levels: Sequence[float],
+    ) -> Sequence[Sequence[float]]:
         ...
 
 

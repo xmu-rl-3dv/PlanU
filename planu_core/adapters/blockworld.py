@@ -186,13 +186,12 @@ class BlockWorldAdapter:
     ) -> TransitionResult:
         del action, rng
         preview_state = self.clone(state)
+        terminated = self.is_terminal(preview_state)
         return TransitionResult(
             state=preview_state,
             reward=0.0,
-            terminated=bool(
-                self.world_model.is_terminal(preview_state.observation)
-            ),
-            truncated=False,
+            terminated=terminated,
+            truncated=self.is_truncated(preview_state) and not terminated,
             info={"record_outcome": False},
         )
 
@@ -256,7 +255,17 @@ class BlockWorldAdapter:
         details = _copied_mapping(raw_details, "reward")
         scalar_reward = _scalar_finite(reward, "reward")
         next_state = EnvironmentState(next_observation, None)
-        terminated = bool(self.world_model.is_terminal(next_observation))
+        goal_reached = aux.get("goal_reached")
+        if goal_reached is None:
+            terminated = self.is_terminal(next_state)
+        else:
+            try:
+                terminated = bool(goal_reached[0])
+            except (IndexError, TypeError) as error:
+                raise ValueError(
+                    "goal_reached must contain a boolean flag"
+                ) from error
+        truncated = self.is_truncated(next_state) and not terminated
         info = dict(details)
         info.update(aux)
         info["node_view"] = node_view
@@ -269,7 +278,7 @@ class BlockWorldAdapter:
             state=next_state,
             reward=scalar_reward,
             terminated=terminated,
-            truncated=False,
+            truncated=truncated,
             info=info,
         )
 
@@ -278,6 +287,15 @@ class BlockWorldAdapter:
 
     def is_terminal(self, state: EnvironmentState) -> bool:
         return bool(self.world_model.is_terminal(state.observation))
+
+    def is_truncated(self, state: EnvironmentState) -> bool:
+        max_steps = getattr(self.world_model, "max_steps", None)
+        step_index = getattr(state.observation, "step_idx", None)
+        return (
+            max_steps is not None
+            and step_index is not None
+            and step_index >= max_steps
+        )
 
 
 def blockworld_config(
@@ -295,6 +313,7 @@ def blockworld_config(
         value_max=vmax,
         quantile_learning_rate=lr,
         discount=1.0,
+        train_curiosity=False,
         include_preview_reward=False,
         max_depth=depth,
         max_iterations=n_iters,

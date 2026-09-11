@@ -68,6 +68,24 @@ class RecordingSearchConfig:
         return 2.5, {"scored": True}
 
 
+class HorizonWorld(FakeWorldModel):
+    max_steps = 1
+
+    def __init__(self, goal_reached):
+        super().__init__()
+        self.goal_reached = goal_reached
+
+    def step(self, state, action):
+        self.step_calls += 1
+        return BlockState(1, action, ""), {
+            "goal_reached": (self.goal_reached, 0.0),
+            "success": True,
+        }
+
+    def is_terminal(self, state):
+        return False
+
+
 def test_actions_preserve_prior_and_fast_reward_visit_count_view():
     world = FakeWorldModel()
     search_config = RecordingSearchConfig()
@@ -212,6 +230,33 @@ def test_step_supports_a_bare_state_result():
         for key, value in result.info.items()
         if key not in {"node_view", "reward_visit"}
     } == {"scored": True}
+
+
+@pytest.mark.parametrize(
+    ("goal_reached", "terminated", "truncated"),
+    [
+        (True, True, False),
+        (False, False, True),
+    ],
+)
+def test_goal_at_horizon_is_terminated_but_horizon_only_is_truncated(
+    goal_reached,
+    terminated,
+    truncated,
+):
+    adapter = BlockWorldAdapter(
+        HorizonWorld(goal_reached),
+        RecordingSearchConfig(),
+    )
+    state = adapter.reset()
+    action = adapter.actions(state, state_visit_count=1)[0]
+
+    result = adapter.step(state, action, np.random.default_rng(3))
+
+    assert result.terminated is terminated
+    assert result.truncated is truncated
+    assert adapter.is_terminal(result.state) is False
+    assert adapter.is_truncated(result.state) is True
 
 
 def test_repeated_steps_derive_reward_visit_count_from_core_argument():
@@ -598,6 +643,7 @@ def test_scorer_order_config_values_and_public_exports():
     assert config.value_max == 100.0
     assert config.discount == 1.0
     assert config.include_preview_reward is False
+    assert config.train_curiosity is False
     assert config.selection_schedule.sample_probability_at(0) == 0.0
     assert adapters.BlockWorldAdapter is BlockWorldAdapter
     assert planu_core.BlockWorldAdapter is BlockWorldAdapter
@@ -914,7 +960,10 @@ def test_evaluate_cli_compiles_and_has_reachable_seeded_planu_branch():
     assert "MCTS(" in ast.unparse(branch.body)
 
 
-def test_evaluate_entrypoint_imports_without_a_deepseek_model(monkeypatch):
+def test_evaluate_entrypoint_imports_without_a_deepseek_model(
+    monkeypatch,
+    tmp_path,
+):
     reasoners = types.ModuleType("reasoners")
     reasoners.__path__ = []
     reasoners.LanguageModel = object
@@ -984,6 +1033,40 @@ def test_evaluate_entrypoint_imports_without_a_deepseek_model(monkeypatch):
         assert (EVALUATE_PATH.parent / relative_path).is_file()
     for relative_path in module.benchmark_paths("v2", "12"):
         assert (EVALUATE_PATH.parent / relative_path).is_file()
+
+    args = module.parse_args()
+    effective = module._build_effective_run_config(
+        args,
+        {"depth_limit": 10, "n_iters": 10},
+        "deepseek/model",
+        10,
+    )
+    assert effective["args"]["success_probability"] == 0.8
+    assert effective["model_identifier"] == "deepseek/model"
+    assert effective["depth"] == 10
+    assert effective["planu_config"] == {
+        "depth_limit": 10,
+        "n_iters": 10,
+    }
+    log_dir = module._build_log_dir(
+        args,
+        "deepseek/model",
+        "abc123def456",
+        base_dir=tmp_path,
+    )
+    assert "seed=100" in log_dir.parts
+    assert log_dir.name == "config=abc123def456"
+
+
+def test_evaluate_writes_json_provenance_before_calling_evaluator():
+    source = EVALUATE_PATH.read_text()
+
+    assert "from planu_core.provenance import" in source
+    assert "effective_config.json" not in source
+    assert source.index("write_json_provenance(") < source.index(
+        "evaluator.evaluate("
+    )
+    assert "log_dir=os.fspath(log_dir)" in source
 
 
 def test_evaluate_reward_keeps_fast_prior_and_includes_first_goal_reward():

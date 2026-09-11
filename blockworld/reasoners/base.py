@@ -234,7 +234,7 @@ class Evaluator():
                 log_dir = f'logs/{version_steps}/'\
                         f'{algo_name}_{model_dir}/'\
                         f'{datetime.now().strftime("%m%d%Y-%H%M%S")}'
-            os.makedirs(log_dir, exist_ok=resume > 0)
+            os.makedirs(log_dir, exist_ok=True)
             os.makedirs(os.path.join(log_dir, 'algo_output'), exist_ok=True)
 
 

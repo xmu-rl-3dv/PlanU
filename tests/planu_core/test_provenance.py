@@ -29,6 +29,38 @@ def test_effective_config_and_hash_are_canonical():
     )
 
 
+def test_effective_config_accepts_named_mapping_config():
+    from planu_core.provenance import build_effective_config
+
+    payload = build_effective_config(
+        SimpleNamespace(algorithm="mcts", seed=7),
+        {"n_iters": 10, "depth_limit": 12},
+        config_name="mcts_config",
+    )
+
+    assert payload == {
+        "args": {"algorithm": "mcts", "seed": 7},
+        "mcts_config": {"n_iters": 10, "depth_limit": 12},
+    }
+
+
+def test_write_json_provenance_creates_stable_files(tmp_path):
+    from planu_core.provenance import write_json_provenance
+
+    log_dir = tmp_path / "seed=7" / "config=abc123"
+    effective_config = {"args": {"seed": 7}}
+    metadata = {"git_commit": "abc", "python_version": "3.9"}
+
+    write_json_provenance(log_dir, effective_config, metadata)
+
+    assert json.loads(
+        (log_dir / "effective_config.json").read_text(encoding="utf-8")
+    ) == effective_config
+    assert json.loads(
+        (log_dir / "run_metadata.json").read_text(encoding="utf-8")
+    ) == metadata
+
+
 def test_installed_versions_maps_ding_to_di_engine():
     from importlib import metadata as importlib_metadata
 

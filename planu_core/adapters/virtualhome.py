@@ -1,4 +1,5 @@
 import copy
+from collections.abc import Mapping
 from enum import Enum
 import math
 from typing import Any, Iterable, Optional, Tuple
@@ -843,6 +844,17 @@ def _scalar_bool(value: Any, name: str) -> bool:
     return bool(flattened[0])
 
 
+def _info_is_truncated(info: Any) -> bool:
+    values = info if isinstance(info, (list, tuple)) else (info,)
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for name in ("TimeLimit.truncated", "truncated"):
+            if name in value and _scalar_bool(value[name], name):
+                return True
+    return False
+
+
 class VirtualHomeAdapter:
     def __init__(
         self,
@@ -878,6 +890,7 @@ class VirtualHomeAdapter:
             except TypeError:
                 observation = self.envs.reset()
         self.envs._planu_terminated = False
+        self.envs._planu_truncated = False
         return EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=self.envs,
@@ -924,8 +937,10 @@ class VirtualHomeAdapter:
         observation, reward, done, info = preview_state.runtime.step(
             np.array([action.payload])
         )
-        terminated = _scalar_bool(done, "done")
+        truncated = _info_is_truncated(info)
+        terminated = _scalar_bool(done, "done") and not truncated
         preview_state.runtime._planu_terminated = terminated
+        preview_state.runtime._planu_truncated = truncated
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
@@ -933,7 +948,7 @@ class VirtualHomeAdapter:
             ),
             reward=_scalar_reward(reward),
             terminated=terminated,
-            truncated=False,
+            truncated=truncated,
             info={"raw_info": info},
         )
 
@@ -947,7 +962,8 @@ class VirtualHomeAdapter:
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])
         )
-        terminated = _scalar_bool(done, "done")
+        truncated = _info_is_truncated(info)
+        terminated = _scalar_bool(done, "done") and not truncated
         raw_reward = _scalar_reward(reward)
         if (
             self.stochastic_probability > 0.0
@@ -955,6 +971,7 @@ class VirtualHomeAdapter:
             and rng.random() < self.stochastic_probability
         ):
             before.runtime._planu_terminated = False
+            before.runtime._planu_truncated = False
             return TransitionResult(
                 state=before,
                 reward=-0.001,
@@ -963,6 +980,7 @@ class VirtualHomeAdapter:
                 info={"raw_info": info},
             )
         state.runtime._planu_terminated = terminated
+        state.runtime._planu_truncated = truncated
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
@@ -970,7 +988,7 @@ class VirtualHomeAdapter:
             ),
             reward=raw_reward if raw_reward > 0.0 else -0.001,
             terminated=terminated,
-            truncated=False,
+            truncated=truncated,
             info={"raw_info": info},
         )
 
@@ -981,6 +999,8 @@ class VirtualHomeAdapter:
         return observation, _runtime_signature(state.runtime)
 
     def is_terminal(self, state: EnvironmentState) -> bool:
+        if self.is_truncated(state):
+            return False
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
                 "_planu_terminated",
@@ -988,6 +1008,19 @@ class VirtualHomeAdapter:
                 "_terminated",
                 "done",
                 "_done",
+            ):
+                if hasattr(runtime, name):
+                    value = np.asarray(getattr(runtime, name)).reshape(-1)
+                    if value.size and bool(value[0]):
+                        return True
+        return False
+
+    def is_truncated(self, state: EnvironmentState) -> bool:
+        for _, runtime in _runtime_objects(state.runtime):
+            for name in (
+                "_planu_truncated",
+                "truncated",
+                "_truncated",
             ):
                 if hasattr(runtime, name):
                     value = np.asarray(getattr(runtime, name)).reshape(-1)
@@ -1006,6 +1039,7 @@ def virtualhome_config(
     return PlanUConfig(
         quantile_learning_rate=0.7,
         curiosity_weight=task.curiosity_weight if rnd else 0.0,
+        train_curiosity=False,
         include_preview_reward=True,
         max_iterations=max_iterations,
         max_depth=max_depth,

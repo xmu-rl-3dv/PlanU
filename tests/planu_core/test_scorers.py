@@ -134,3 +134,74 @@ def test_shared_normalization_matches_reference_math():
     expected = np.exp(expected_logits - expected_logits.max())
     expected /= expected.sum()
     np.testing.assert_allclose(actual, expected)
+
+
+def test_distribution_scorer_uses_legacy_criteria_and_injected_likelihoods():
+    from planu_core.scorers import HuggingFaceActionScorer
+
+    calls = []
+
+    def fake_likelihoods(prefix, completions):
+        calls.append((prefix, tuple(completions)))
+        if "first action" in prefix:
+            return [0.0, 1.0, 2.0, 3.0, 4.0], [1] * 5, 31
+        return [4.0, 3.0, 2.0, 1.0, 0.0], [1] * 5, 29
+
+    scorer = HuggingFaceActionScorer(
+        "fake/model",
+        normalization_mode="sum",
+        tokenizer=object(),
+        model=object(),
+        device="cpu",
+        distribution_prompt="distribution rubric\n",
+        log_likelihood_helper=fake_likelihoods,
+    )
+    candidates = [
+        ActionCandidate(0, 0, "first action", {"prompt": "state prompt"}),
+        ActionCandidate(1, 1, "second action", {"prompt": "state prompt"}),
+    ]
+
+    rows = scorer.score_distributions(
+        object(),
+        candidates,
+        (0.1, 0.3, 0.5, 0.7, 0.9),
+    )
+
+    criteria = (
+        "very low",
+        "somewhat low",
+        "medium level",
+        "somewhat high",
+        "very high",
+    )
+    assert [call[1] for call in calls] == [criteria, criteria]
+    assert all(call[0].startswith("distribution rubric\nstate prompt") for call in calls)
+    expected = np.exp(np.arange(5, dtype=np.float64))
+    expected /= expected.sum()
+    np.testing.assert_allclose(rows[0], expected)
+    np.testing.assert_allclose(rows[1], expected[::-1])
+    assert scorer.total_llm_tokenizer_token == 60
+    assert scorer.total_llm_tokenizer_call == 2
+
+
+def test_distribution_scorer_requires_five_levels():
+    from planu_core.scorers import HuggingFaceActionScorer
+
+    scorer = HuggingFaceActionScorer(
+        "fake/model",
+        tokenizer=object(),
+        model=object(),
+        device="cpu",
+        log_likelihood_helper=lambda prefix, completions: (
+            [0.0] * len(completions),
+            [1] * len(completions),
+            len(completions),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="five categorical levels"):
+        scorer.score_distributions(
+            None,
+            [ActionCandidate(0, 0, "action", {"prompt": "prompt"})],
+            (0.1, 0.9),
+        )

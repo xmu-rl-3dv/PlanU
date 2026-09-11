@@ -214,6 +214,7 @@ def test_virtualhome_config_exact_values(task, rnd, expected_curiosity):
 
     assert config.quantile_learning_rate == 0.7
     assert config.curiosity_weight == expected_curiosity
+    assert config.train_curiosity is False
     assert config.include_preview_reward is True
     assert config.selection_temperature == 1.0
     assert config.max_iterations == 17
@@ -544,6 +545,21 @@ def test_state_key_scans_wrappers_inner_env_and_unwrapped():
             adapter.state_key(unwrapped),
         }
     ) == 4
+
+
+def test_is_truncated_defaults_false_and_reads_explicit_runtime_state():
+    adapter = VirtualHomeAdapter(
+        FakeVectorEnv(FOOD_INITIAL),
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+    state = adapter.reset()
+
+    assert adapter.is_truncated(state) is False
+
+    state.runtime.envs[0]._truncated = True
+    assert adapter.is_truncated(state) is True
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ from planu_core.interfaces import (
     ActionCandidate,
     ActionScorer,
     CuriosityProvider,
+    DistributionScorer,
     EnvironmentAdapter,
     EnvironmentState,
     TransitionResult,
@@ -109,12 +110,17 @@ def test_created_outcome_records_parent_and_completion_flags():
     action = make_action_node()
 
     outcome = action.get_or_create_outcome(
-        [1], (1,), terminated=True, truncated=True
+        [1],
+        (1,),
+        terminated=False,
+        truncated=True,
+        truncation_reason="environment_truncated",
     )
 
     assert outcome.parent is action
-    assert outcome.terminated is True
+    assert outcome.terminated is False
     assert outcome.truncated is True
+    assert outcome.truncation_reason == "environment_truncated"
 
 
 @pytest.mark.parametrize(
@@ -290,6 +296,10 @@ def test_environment_adapter_protocol_matches_stateful_contract():
             {"state": EnvironmentState, "return": bool},
             {},
         ),
+        "is_truncated": (
+            {"state": EnvironmentState, "return": bool},
+            {},
+        ),
     }
 
     for method_name, (expected_hints, expected_defaults) in expected.items():
@@ -306,6 +316,9 @@ def test_environment_adapter_protocol_matches_stateful_contract():
 
 def test_provider_protocol_return_types():
     assert get_type_hints(ActionScorer.score)["return"] == Sequence[float]
+    assert get_type_hints(DistributionScorer.score_distributions)["return"] == (
+        Sequence[Sequence[float]]
+    )
     assert get_type_hints(CuriosityProvider.train)["return"] == Optional[
         Mapping[str, float]
     ]
@@ -319,6 +332,7 @@ def test_task_three_types_are_exported_from_package():
         "ActionNode": ActionNode,
         "ActionScorer": ActionScorer,
         "CuriosityProvider": CuriosityProvider,
+        "DistributionScorer": DistributionScorer,
         "EnvironmentAdapter": EnvironmentAdapter,
         "EnvironmentState": EnvironmentState,
         "LanguageNode": LanguageNode,

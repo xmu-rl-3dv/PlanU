@@ -14,6 +14,8 @@ class LanguageNode:
     visit_count: int = 0
     terminated: bool = False
     truncated: bool = False
+    truncation_reason: Optional[str] = None
+    debug_fingerprint: Any = field(default=None, repr=False)
     outcome_visits: int = 0
 
 
@@ -34,6 +36,8 @@ class ActionNode:
         terminated: bool,
         truncated: bool,
         increment_visit: bool = True,
+        truncation_reason: Optional[str] = None,
+        debug_fingerprint: Any = None,
     ) -> LanguageNode:
         child = self.children.get(state_key)
         if child is None:
@@ -43,11 +47,18 @@ class ActionNode:
                 parent=self,
                 terminated=terminated,
                 truncated=truncated,
+                truncation_reason=truncation_reason,
+                debug_fingerprint=debug_fingerprint,
             )
             self.children[state_key] = child
-        elif child.terminated != terminated or child.truncated != truncated:
+        elif (
+            child.terminated != terminated
+            or child.truncated != truncated
+            or child.truncation_reason != truncation_reason
+        ):
             raise ValueError(
-                "inconsistent terminated/truncated flags for existing outcome"
+                "inconsistent terminated/truncated flags or reason "
+                "for existing outcome"
             )
         if increment_visit:
             child.outcome_visits += 1

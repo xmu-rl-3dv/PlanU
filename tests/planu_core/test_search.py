@@ -46,6 +46,19 @@ class FixedScorer:
         return self.scores
 
 
+class FixedDistributionScorer:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def score(self, observation, actions):
+        raise AssertionError("scalar scoring must not run")
+
+    def score_distributions(self, observation, actions, levels):
+        self.calls.append((observation, list(actions), tuple(levels)))
+        return self.rows
+
+
 class DuplicateActionAdapter(FakeAdapter):
     def actions(self, state, state_visit_count=0):
         self.action_calls += 1
@@ -184,6 +197,57 @@ class HiddenResetAdapter(FakeAdapter):
         )
 
 
+class ConstantOutcomeKeyAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.outcome = 0
+
+    def actions(self, state, state_visit_count=0):
+        self.action_calls += 1
+        return [ActionCandidate("advance", 0, "advance")]
+
+    def preview(self, state, action, rng):
+        self.preview_calls += 1
+        return TransitionResult(
+            copy.deepcopy(state),
+            0.0,
+            False,
+            False,
+            {"record_outcome": False},
+        )
+
+    def step(self, state, action, rng):
+        self.actions_taken.append(action.key)
+        self.outcome += 1
+        state.runtime["position"] = self.outcome
+        state.observation = np.array([self.outcome])
+        return TransitionResult(state, 0.0, False, False)
+
+    def state_key(self, state):
+        if state.runtime["position"] == 0:
+            return "root"
+        return "constant-outcome"
+
+    def is_terminal(self, state):
+        return False
+
+
+class ConstantRootKeyAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.episode = 0
+
+    def reset(self, seed=None):
+        self.episode += 1
+        return EnvironmentState(
+            observation=np.array([self.episode]),
+            runtime={"position": 0},
+        )
+
+    def state_key(self, state):
+        return "constant-root"
+
+
 class NoPreviewOutcomeAdapter(FakeAdapter):
     def preview(self, state, action, rng):
         result = super().preview(state, action, rng)
@@ -218,6 +282,42 @@ class AdapterTerminalOnlyAdapter(FakeAdapter):
         )
 
 
+class TruncatingTransitionAdapter(FakeAdapter):
+    def __init__(self, reason=None):
+        super().__init__()
+        self.reason = reason
+
+    def step(self, state, action, rng):
+        self.actions_taken.append(action.key)
+        state.runtime["position"] = 1
+        state.observation = np.array([1])
+        info = {}
+        if self.reason is not None:
+            info["truncation_reason"] = self.reason
+        return TransitionResult(state, 0.0, False, True, info)
+
+    def is_terminal(self, state):
+        return False
+
+
+class AdapterTruncationOnlyAdapter(FakeAdapter):
+    def is_terminal(self, state):
+        return False
+
+    def is_truncated(self, state):
+        return state.runtime["position"] >= 1
+
+
+class TruncatedRootAdapter(AdapterTruncationOnlyAdapter):
+    def reset(self, seed=None):
+        self.reset_seeds.append(seed)
+        self.reset_state = EnvironmentState(
+            observation=np.array([1]),
+            runtime={"position": 1},
+        )
+        return self.reset_state
+
+
 class LegacyThreeArgumentAdapter(FakeAdapter):
     def step(self, state, action, rng):
         self.actions_taken.append(action.key)
@@ -249,6 +349,7 @@ def test_search_types_are_exported_from_package():
         "rewards",
         "terminated",
         "truncated",
+        "truncation_reason",
         "final_observation",
         "selection_scores",
         "action_path",
@@ -391,6 +492,8 @@ def test_max_depth_exhaustion_marks_final_state_and_result_truncated():
     assert result.terminated is False
     assert result.truncated is True
     assert result.state_path[-1].truncated is True
+    assert result.state_path[-1].truncation_reason == "max_depth"
+    assert result.truncation_reason == "max_depth"
 
 
 def test_terminal_root_returns_empty_without_listing_or_scoring_actions(
@@ -418,6 +521,7 @@ def test_terminal_root_returns_empty_without_listing_or_scoring_actions(
     assert result.rewards == []
     assert result.terminated is True
     assert result.truncated is False
+    assert result.truncation_reason is None
     np.testing.assert_array_equal(result.final_observation, [2])
     assert result.action_path == []
     assert result.state_path == [search.root]
@@ -427,6 +531,46 @@ def test_terminal_root_returns_empty_without_listing_or_scoring_actions(
     assert adapter.action_calls == 0
     assert scorer.calls == 0
     assert backup_calls == [([], [])]
+
+
+def test_truncated_root_returns_empty_with_environment_reason():
+    adapter = TruncatedRootAdapter()
+    scorer = UniformScorer()
+    search = PlanUSearch(adapter, scorer, PlanUConfig())
+
+    result = search.run_iteration(0, np.random.default_rng(3))
+
+    assert result.actions == []
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "environment_truncated"
+    assert result.state_path == [search.root]
+    assert search.root.truncation_reason == "environment_truncated"
+    assert adapter.action_calls == 0
+    assert scorer.calls == 0
+
+
+def test_preview_and_post_step_use_adapter_truncation_state():
+    adapter = AdapterTruncationOnlyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=3),
+    )
+    state = adapter.reset()
+    root = search._ensure_root(state)
+
+    search.expand(root, state, np.random.default_rng(3))
+
+    preview_outcome = root.children["advance"].children[((1,), 1)]
+    assert preview_outcome.truncated is True
+    assert preview_outcome.truncation_reason == "environment_truncated"
+
+    result = search.run_iteration(0, np.random.default_rng(4))
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "environment_truncated"
 
 
 @pytest.mark.parametrize(
@@ -598,6 +742,86 @@ def test_preview_reward_configuration_and_record_outcome_flag():
     np.testing.assert_array_equal(without_action.preview_state, [1])
 
 
+def test_categorical_initialization_maps_rows_and_shifts_preview_reward():
+    adapter = BranchingAdapter()
+    scorer = FixedDistributionScorer(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    config = PlanUConfig(
+        categorical_initialization=True,
+        n_quantiles=5,
+        value_min=-1.0,
+        value_max=1.0,
+    )
+    search = PlanUSearch(adapter, scorer, config)
+    state = adapter.reset()
+    root = search._ensure_root(state)
+
+    search.expand(root, state, np.random.default_rng(8))
+
+    assert len(scorer.calls) == 1
+    assert scorer.calls[0][2] == config.categorical_levels
+    np.testing.assert_allclose(
+        root.children["left"].distribution.values,
+        [0.6, 0.8, 1.0, 1.0, 1.0],
+    )
+    np.testing.assert_allclose(
+        root.children["right"].distribution.values,
+        [1.0] * 5,
+    )
+
+
+def test_categorical_initialization_requires_distribution_scorer():
+    search = PlanUSearch(
+        FakeAdapter(),
+        UniformScorer(),
+        PlanUConfig(categorical_initialization=True),
+    )
+    state = search.adapter.reset()
+    root = search._ensure_root(state)
+
+    with pytest.raises(ValueError, match="score_distributions"):
+        search.expand(root, state, np.random.default_rng(8))
+
+    assert search.scorer.calls == 0
+    assert search.adapter.preview_calls == 0
+    assert root.children == {}
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([], "row count"),
+        ([[1.0, 0.0]], "shape"),
+        ([[1.0, 0.0, 0.0, 0.0, float("nan")]], "finite"),
+        ([[1.0, 0.0, 0.0, 0.0, -0.1]], "nonnegative"),
+        ([[0.0, 0.0, 0.0, 0.0, 0.0]], "nonzero"),
+    ],
+)
+def test_invalid_distribution_scores_fail_before_preview_or_mutation(
+    rows,
+    message,
+):
+    adapter = FakeAdapter()
+    scorer = FixedDistributionScorer(rows)
+    search = PlanUSearch(
+        adapter,
+        scorer,
+        PlanUConfig(categorical_initialization=True),
+    )
+    state = adapter.reset()
+    root = search._ensure_root(state)
+
+    with pytest.raises(ValueError, match=message):
+        search.expand(root, state, np.random.default_rng(8))
+
+    assert adapter.preview_calls == 0
+    assert root.children == {}
+
+
 def test_expand_delegates_preview_isolation_without_cloning_state():
     adapter = PreviewOwnsIsolationAdapter()
     search = PlanUSearch(adapter, UniformScorer(), PlanUConfig())
@@ -659,6 +883,91 @@ def test_reset_hidden_state_key_mismatch_is_rejected():
     np.testing.assert_array_equal(search.root.state, [0])
 
 
+def test_state_key_collision_detection_is_disabled_by_default():
+    adapter = ConstantOutcomeKeyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+    )
+
+    search.run_iteration(0, np.random.default_rng(1))
+    search.run_iteration(1, np.random.default_rng(2))
+
+    outcome = search.root.children["advance"].children["constant-outcome"]
+    np.testing.assert_array_equal(outcome.state, [1])
+    assert outcome.outcome_visits == 2
+
+
+def test_outcome_state_key_collision_raises_and_rolls_back():
+    adapter = ConstantOutcomeKeyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1, debug_state_keys=True),
+    )
+    search.run_iteration(0, np.random.default_rng(1))
+    root = search.root
+    action = root.children["advance"]
+    outcome = action.children["constant-outcome"]
+    before = (
+        root.visit_count,
+        action.visit_count,
+        list(action.cumulative_returns),
+        outcome.outcome_visits,
+    )
+
+    with pytest.raises(ValueError, match="state key collision"):
+        search.run_iteration(1, np.random.default_rng(2))
+
+    assert search.root is root
+    assert (
+        root.visit_count,
+        action.visit_count,
+        action.cumulative_returns,
+        outcome.outcome_visits,
+    ) == before
+    np.testing.assert_array_equal(outcome.state, [1])
+
+
+def test_root_state_key_collision_raises_without_replacing_root():
+    adapter = ConstantRootKeyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=True),
+    )
+    root = search._ensure_root(adapter.reset())
+
+    with pytest.raises(ValueError, match="state key collision"):
+        search._ensure_root(adapter.reset())
+
+    assert search.root is root
+    np.testing.assert_array_equal(root.state, [1])
+
+
+def test_adapter_state_fingerprint_is_preferred_over_pickle():
+    adapter = ConstantRootKeyAdapter()
+    calls = []
+
+    def state_fingerprint(state):
+        calls.append(state.runtime["position"])
+        return bytes(np.asarray(state.observation))
+
+    adapter.state_fingerprint = state_fingerprint
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=True),
+    )
+    search._ensure_root(adapter.reset())
+
+    with pytest.raises(ValueError, match="state key collision"):
+        search._ensure_root(adapter.reset())
+
+    assert calls == [0, 0]
+
+
 def test_seeded_sampling_is_reproducible():
     config = PlanUConfig(
         max_depth=1,
@@ -718,6 +1027,8 @@ def test_empty_actions_truncates_unexpanded_state_and_backs_up_empty(
     assert result.state_path == [search.root]
     assert search.root.children == {}
     assert search.root.truncated is True
+    assert search.root.truncation_reason == "no_legal_actions"
+    assert result.truncation_reason == "no_legal_actions"
     assert search.root.visit_count == 1
     assert adapter.action_calls == 1
     assert scorer.calls == 0
@@ -743,12 +1054,14 @@ def test_backup_failure_restores_existing_tree_mutations(monkeypatch):
         root.visit_count,
         root.terminated,
         root.truncated,
+        root.truncation_reason,
         root.outcome_visits,
     )
     outcome_state_before = (
         existing_outcome.visit_count,
         existing_outcome.terminated,
         existing_outcome.truncated,
+        existing_outcome.truncation_reason,
         existing_outcome.outcome_visits,
     )
     action_visit_count_before = action.visit_count
@@ -770,12 +1083,14 @@ def test_backup_failure_restores_existing_tree_mutations(monkeypatch):
         root.visit_count,
         root.terminated,
         root.truncated,
+        root.truncation_reason,
         root.outcome_visits,
     ) == root_state_before
     assert (
         existing_outcome.visit_count,
         existing_outcome.terminated,
         existing_outcome.truncated,
+        existing_outcome.truncation_reason,
         existing_outcome.outcome_visits,
     ) == outcome_state_before
     assert action.visit_count == action_visit_count_before
@@ -825,3 +1140,25 @@ def test_non_finite_actual_reward_fails_before_outcome_mutation(
 
     assert root.visit_count == root_visit_count_before
     assert outcome.outcome_visits == outcome_visits_before
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("time_limit", "time_limit"),
+        (None, "environment_truncated"),
+    ],
+)
+def test_transition_truncation_reason_is_recorded(reason, expected):
+    search = PlanUSearch(
+        TruncatingTransitionAdapter(reason),
+        UniformScorer(),
+        PlanUConfig(max_depth=3),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(26))
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == expected
+    assert result.state_path[-1].truncation_reason == expected
