@@ -80,3 +80,54 @@ def test_config_rejects_invalid_values(kwargs):
 
     with pytest.raises(ValueError):
         PlanUConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (float("nan"), "curiosity_weight must be finite"),
+        (float("inf"), "curiosity_weight must be finite"),
+        (float("-inf"), "curiosity_weight must be finite"),
+        (-0.01, "curiosity_weight must be nonnegative"),
+    ],
+)
+def test_config_rejects_invalid_curiosity_weight(value, message):
+    from planu_core import PlanUConfig
+
+    with pytest.raises(ValueError, match=message):
+        PlanUConfig(curiosity_weight=value)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (float("nan"), "risk_distortion must be finite"),
+        (float("inf"), "risk_distortion must be finite"),
+        (float("-inf"), "risk_distortion must be finite"),
+        (-1.01, "risk_distortion must be between -1 and 1"),
+        (1.01, "risk_distortion must be between -1 and 1"),
+    ],
+)
+def test_config_rejects_invalid_risk_distortion(value, message):
+    from planu_core import PlanUConfig
+
+    with pytest.raises(ValueError, match=message):
+        PlanUConfig(risk_distortion=value)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"value_min": float("nan")}, "value_min must be finite"),
+        ({"value_min": float("inf")}, "value_min must be finite"),
+        ({"value_min": float("-inf")}, "value_min must be finite"),
+        ({"value_max": float("nan")}, "value_max must be finite"),
+        ({"value_max": float("inf")}, "value_max must be finite"),
+        ({"value_max": float("-inf")}, "value_max must be finite"),
+    ],
+)
+def test_config_rejects_nonfinite_value_bounds(kwargs, message):
+    from planu_core import PlanUConfig
+
+    with pytest.raises(ValueError, match=message):
+        PlanUConfig(**kwargs)

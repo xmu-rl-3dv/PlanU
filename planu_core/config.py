@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 
 
@@ -50,11 +51,23 @@ class PlanUConfig:
             raise ValueError("max_depth must be positive")
         if self.max_iterations <= 0:
             raise ValueError("max_iterations must be positive")
+        if not math.isfinite(self.value_min):
+            raise ValueError("value_min must be finite")
+        if not math.isfinite(self.value_max):
+            raise ValueError("value_max must be finite")
         if not self.value_min < self.value_max:
             raise ValueError("value_min must be less than value_max")
         if not 0.0 < self.quantile_learning_rate <= 1.0:
             raise ValueError("quantile_learning_rate must be between 0 and 1")
         if not 0.0 <= self.discount <= 1.0:
             raise ValueError("discount must be between 0 and 1")
+        if not math.isfinite(self.curiosity_weight):
+            raise ValueError("curiosity_weight must be finite")
+        if self.curiosity_weight < 0.0:
+            raise ValueError("curiosity_weight must be nonnegative")
         if not self.selection_temperature > 0.0:
             raise ValueError("selection_temperature must be positive")
+        if not math.isfinite(self.risk_distortion):
+            raise ValueError("risk_distortion must be finite")
+        if not -1.0 <= self.risk_distortion <= 1.0:
+            raise ValueError("risk_distortion must be between -1 and 1")
