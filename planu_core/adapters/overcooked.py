@@ -580,6 +580,7 @@ class OvercookedAdapter:
                 observation = self.envs.reset(seed=seed)
             except TypeError:
                 observation = self.envs.reset()
+        self.envs._planu_terminated = False
         return EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=self.envs,

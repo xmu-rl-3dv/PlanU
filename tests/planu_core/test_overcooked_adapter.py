@@ -404,6 +404,45 @@ def test_reset_falls_back_for_gym_021_without_double_successful_reset():
     assert env.reset_calls == [None]
 
 
+@pytest.mark.parametrize(
+    ("accepts_seed", "expected_reset_calls"),
+    [(True, [17]), (False, [None])],
+)
+def test_reset_clears_terminal_marker_after_successful_env_reset(
+    accepts_seed,
+    expected_reset_calls,
+):
+    env = FakeVectorEnv(accepts_seed=accepts_seed)
+    env._planu_terminated = True
+    adapter = OvercookedAdapter(env, 0, 0.2, np.random.default_rng(1))
+
+    state = adapter.reset(seed=17)
+
+    assert state.runtime is env
+    assert state.runtime._planu_terminated is False
+    assert adapter.is_terminal(state) is False
+    assert env.reset_calls == expected_reset_calls
+
+
+def test_reset_failure_preserves_terminal_marker():
+    class FailingFallbackEnv(FakeVectorEnv):
+        def reset(self, **kwargs):
+            if kwargs:
+                raise TypeError(
+                    "reset() got an unexpected keyword argument 'seed'"
+                )
+            raise RuntimeError("reset failed")
+
+    env = FailingFallbackEnv()
+    env._planu_terminated = True
+    adapter = OvercookedAdapter(env, 0, 0.2, np.random.default_rng(1))
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        adapter.reset(seed=17)
+
+    assert env._planu_terminated is True
+
+
 def test_actions_use_first_vector_observation_and_share_prompt_metadata():
     adapter = OvercookedAdapter(
         FakeVectorEnv(),
@@ -639,6 +678,26 @@ def test_adapter_and_shared_search_smoke():
     assert result.terminated is True
     assert len(search.root.children) == 5
     assert env.reset_calls == [None]
+
+
+def test_shared_search_executes_action_after_terminal_iteration_reset():
+    env = FakeVectorEnv(done=True)
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        overcooked_config(0, False, 2, 2, 1.0),
+    )
+
+    first = search.run_iteration(0, np.random.default_rng(7))
+    second = search.run_iteration(1, np.random.default_rng(8))
+
+    assert first.terminated is True
+    assert second.terminated is True
+    assert len(first.actions) == 1
+    assert len(second.actions) == 1
+    assert len(env.step_calls) == 2
+    assert env.reset_calls == [None, None]
 
 
 def test_scorer_module_imports_without_optional_ml_dependencies():
