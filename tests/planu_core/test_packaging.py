@@ -65,6 +65,24 @@ def _relative_archive_members(names):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_dev_requirements_cover_the_complete_test_toolchain(self):
+        requirements = {
+            line.strip()
+            for line in (REPOSITORY_ROOT / "requirements-dev.txt")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+        self.assertLessEqual(
+            {
+                "numpy>=1.24,<2",
+                "pytest>=7.4,<9",
+                "wheel>=0.37",
+            },
+            requirements,
+        )
+
     def test_distribution_contains_and_imports_shared_planu_core(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = Path(temporary_directory)
