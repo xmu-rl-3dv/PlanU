@@ -25,6 +25,35 @@ def make_action_node() -> ActionNode:
     )
 
 
+def make_populated_tree():
+    root = LanguageNode(state=["root"], state_key=("root",))
+    action = ActionNode(
+        parent=root,
+        action=ActionCandidate("open", 4, "open microwave"),
+        distribution=QuantileDistribution.from_scalar(0.2, 5, -1.0, 1.0),
+    )
+    root.children[action.action.key] = action
+    action.get_or_create_outcome(
+        state=["outcome"],
+        state_key=("outcome",),
+        terminated=False,
+        truncated=False,
+    )
+    return root, action
+
+
+@pytest.mark.parametrize("node_index", [0, 1], ids=["language", "action"])
+def test_tree_nodes_use_identity_equality(node_index):
+    first_tree = make_populated_tree()
+    second_tree = make_populated_tree()
+    first = first_tree[node_index]
+    second = second_tree[node_index]
+
+    assert first != second
+    assert first == first
+    assert second == second
+
+
 def test_action_node_merges_equal_outcomes():
     action = make_action_node()
 

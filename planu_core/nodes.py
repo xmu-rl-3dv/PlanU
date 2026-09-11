@@ -5,7 +5,7 @@ from .distribution import QuantileDistribution
 from .interfaces import ActionCandidate
 
 
-@dataclass
+@dataclass(eq=False)
 class LanguageNode:
     state: Any
     state_key: Hashable
@@ -17,7 +17,7 @@ class LanguageNode:
     outcome_visits: int = 0
 
 
-@dataclass
+@dataclass(eq=False)
 class ActionNode:
     parent: LanguageNode
     action: ActionCandidate
