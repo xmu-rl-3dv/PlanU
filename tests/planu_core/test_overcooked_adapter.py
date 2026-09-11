@@ -181,6 +181,144 @@ class FakeVectorEnv:
         )
 
 
+class _FakeOvercookedHorizonEnv:
+    horizon = 0
+
+    def __init__(self, observation, reward, reward_list=None, info=None):
+        self.observation = np.asarray(observation).reshape(-1)
+        self.reward = reward
+        self.env_step = self.horizon - 1
+        if reward_list is not None:
+            self.rewardList = dict(reward_list)
+        self.info = {} if info is None else dict(info)
+
+    @property
+    def unwrapped(self):
+        return self
+
+    def step(self, action):
+        del action
+        self.env_step += 1
+        done = self.env_step >= self.horizon
+        info = dict(self.info)
+        if done:
+            info.setdefault("episode", {"l": self.env_step})
+        return (
+            np.array(self.observation, copy=True),
+            self.reward,
+            done,
+            info,
+        )
+
+
+class Overcooked_LLMA_V4(_FakeOvercookedHorizonEnv):
+    __module__ = "gym_macro_overcooked.overcooked_LLMA_V4"
+    horizon = 60
+
+
+class Overcooked_LLMA_V3(_FakeOvercookedHorizonEnv):
+    __module__ = "gym_macro_overcooked.overcooked_LLMA_V3"
+    horizon = 200
+
+
+class ExplicitEnvStepLimit(_FakeOvercookedHorizonEnv):
+    horizon = 7
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_episode_steps = self.horizon
+
+
+class ExplicitElapsedStepLimit(_FakeOvercookedHorizonEnv):
+    horizon = 1
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        del self.env_step
+        self._elapsed_steps = 0
+        self.max_episode_steps = self.horizon
+
+    def step(self, action):
+        del action
+        self._elapsed_steps += 1
+        done = self._elapsed_steps >= self.max_episode_steps
+        return (
+            np.array(self.observation, copy=True),
+            self.reward,
+            done,
+            dict(self.info),
+        )
+
+
+class FakeGymWrapper:
+    def __init__(self, env):
+        self.env = env
+
+    @property
+    def unwrapped(self):
+        return self.env.unwrapped
+
+    def step(self, action):
+        return self.env.step(action)
+
+
+class FakeOvercookedHorizonVectorEnv:
+    num_envs = 1
+
+    def __init__(
+        self,
+        inner_type,
+        reward,
+        reward_list=None,
+        info=None,
+        observation=TASK_0_INITIAL,
+    ):
+        self.inner_type = inner_type
+        self.initial_observation = np.array(observation, copy=True)
+        self.reward = reward
+        self.reward_list = reward_list
+        self.info = info
+        self.envs = []
+        self.reset_calls = []
+        self.step_calls = []
+        self._new_inner()
+
+    def _new_inner(self):
+        inner = self.inner_type(
+            self.initial_observation[0],
+            self.reward,
+            self.reward_list,
+            self.info,
+        )
+        self.envs = [FakeGymWrapper(inner)]
+
+    def reset(self, **kwargs):
+        self.reset_calls.append(kwargs.get("seed"))
+        self._new_inner()
+        return np.array(self.initial_observation, copy=True)
+
+    def step(self, action):
+        self.step_calls.append(np.array(action, copy=True))
+        observation, reward, done, info = self.envs[0].step(action[0])
+        return (
+            observation[np.newaxis, :],
+            np.array([reward]),
+            np.array([done]),
+            [info],
+        )
+
+
+class AutoResetOvercookedHorizonVectorEnv(
+    FakeOvercookedHorizonVectorEnv
+):
+    def step(self, action):
+        result = super().step(action)
+        if bool(result[2][0]):
+            self._new_inner()
+            self.envs[0].env.env_step = 0
+        return result
+
+
 class FixedRng:
     def __init__(self, value):
         self.value = value
@@ -427,13 +565,20 @@ def test_reset_clears_terminal_marker_after_successful_env_reset(
 ):
     env = FakeVectorEnv(accepts_seed=accepts_seed)
     env._planu_terminated = True
+    env._planu_truncated = True
+    env.envs[0]._planu_terminated = True
+    env.envs[0]._planu_truncated = True
     adapter = OvercookedAdapter(env, 0, 0.2, np.random.default_rng(1))
 
     state = adapter.reset(seed=17)
 
     assert state.runtime is env
     assert state.runtime._planu_terminated is False
+    assert state.runtime._planu_truncated is False
+    assert state.runtime.envs[0]._planu_terminated is False
+    assert state.runtime.envs[0]._planu_truncated is False
     assert adapter.is_terminal(state) is False
+    assert adapter.is_truncated(state) is False
     assert env.reset_calls == expected_reset_calls
 
 
@@ -544,7 +689,9 @@ def test_chop_failure_returns_pre_step_snapshot_and_penalty():
     assert result.terminated is False
     assert result.truncated is False
     assert result.state.runtime._planu_terminated is False
+    assert result.state.runtime._planu_truncated is False
     assert adapter.is_terminal(result.state) is False
+    assert adapter.is_truncated(result.state) is False
     assert len(env.step_calls) == 1
 
 
@@ -664,6 +811,217 @@ def test_is_truncated_defaults_false_and_reads_explicit_runtime_state():
 
     state.runtime.envs[0].truncated = True
     assert adapter.is_truncated(state) is True
+
+
+@pytest.mark.parametrize(
+    ("inner_type", "expected_limit"),
+    [
+        (Overcooked_LLMA_V4, 60),
+        (Overcooked_LLMA_V3, 200),
+    ],
+)
+@pytest.mark.parametrize("transition_name", ["preview", "step"])
+def test_overcooked_version_horizon_without_serve_is_truncated(
+    inner_type,
+    expected_limit,
+    transition_name,
+):
+    env = FakeOvercookedHorizonVectorEnv(inner_type, reward=-0.001)
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = getattr(adapter, transition_name)(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.state.runtime.envs[0].env.env_step == expected_limit
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
+    assert result.state.runtime._planu_terminated is False
+    assert result.state.runtime._planu_truncated is True
+    assert adapter.is_terminal(result.state) is False
+    assert adapter.is_truncated(result.state) is True
+
+
+@pytest.mark.parametrize(
+    "inner_type",
+    [ExplicitEnvStepLimit, ExplicitElapsedStepLimit],
+)
+def test_overcooked_explicit_runtime_limits_are_truncated(inner_type):
+    env = FakeOvercookedHorizonVectorEnv(inner_type, reward=0.0)
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
+
+
+@pytest.mark.parametrize("transition_name", ["preview", "step"])
+def test_overcooked_positive_serve_at_v4_horizon_remains_terminal(
+    transition_name,
+):
+    env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=1.0,
+        reward_list={
+            "correct delivery": 1.0,
+            "step penalty": -0.001,
+        },
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+    serve = ActionCandidate(3, 3, "serve the dish")
+
+    result = getattr(adapter, transition_name)(
+        state,
+        serve,
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is True
+    assert result.truncated is False
+    assert "truncation_reason" not in result.info
+    assert result.state.runtime._planu_terminated is True
+    assert result.state.runtime._planu_truncated is False
+    assert adapter.is_terminal(result.state) is True
+    assert adapter.is_truncated(result.state) is False
+
+
+def test_overcooked_serve_uses_correct_delivery_threshold_when_available():
+    env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=0.25,
+        reward_list={"correct delivery": 1.0},
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+
+
+def test_overcooked_positive_serve_falls_back_without_reward_list():
+    env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=0.25,
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is True
+    assert result.truncated is False
+
+
+def test_overcooked_explicit_time_limit_requires_explicit_success_override():
+    truncated_env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=1.0,
+        info={"TimeLimit.truncated": True},
+    )
+    truncated_adapter = OvercookedAdapter(
+        truncated_env,
+        0,
+        0.0,
+        np.random.default_rng(1),
+    )
+    truncated_state = truncated_adapter.reset()
+
+    truncated = truncated_adapter.step(
+        truncated_state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert truncated.terminated is False
+    assert truncated.truncated is True
+
+    success_env = FakeOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=1.0,
+        info={"TimeLimit.truncated": True, "is_success": True},
+    )
+    success_adapter = OvercookedAdapter(
+        success_env,
+        0,
+        0.0,
+        np.random.default_rng(1),
+    )
+    success_state = success_adapter.reset()
+
+    success = success_adapter.step(
+        success_state,
+        ActionCandidate(3, 3, "serve the dish"),
+        np.random.default_rng(2),
+    )
+
+    assert success.terminated is True
+    assert success.truncated is False
+
+
+def test_overcooked_search_reports_environment_horizon():
+    adapter = OvercookedAdapter(
+        FakeOvercookedHorizonVectorEnv(
+            Overcooked_LLMA_V4,
+            reward=-0.001,
+        ),
+        0,
+        0.0,
+        np.random.default_rng(1),
+    )
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        overcooked_config(0, False, 1, 2),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(7))
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "environment_horizon"
+    assert result.state_path[-1].truncation_reason == "environment_horizon"
+
+
+def test_overcooked_horizon_survives_vector_env_auto_reset():
+    env = AutoResetOvercookedHorizonVectorEnv(
+        Overcooked_LLMA_V4,
+        reward=-0.001,
+    )
+    adapter = OvercookedAdapter(env, 0, 0.0, np.random.default_rng(1))
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.state.runtime.envs[0].env.env_step == 0
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
 
 
 def test_preview_persists_done_as_private_runtime_terminal_marker():

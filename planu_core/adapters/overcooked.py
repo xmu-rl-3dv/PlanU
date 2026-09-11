@@ -560,6 +560,310 @@ def _info_is_truncated(info: Any) -> bool:
     return False
 
 
+def _info_success(info: Any) -> Optional[bool]:
+    values = info if isinstance(info, (list, tuple)) else (info,)
+    found = False
+    success = False
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for name in (
+            "is_success",
+            "success",
+            "goal_reached",
+            "goal_achieved",
+            "task_success",
+            "correct_delivery",
+        ):
+            if name in value:
+                found = True
+                success = success or _scalar_bool(value[name], name)
+    return success if found else None
+
+
+def _counter_limit_status(
+    runtime: Any,
+    counter_name: str,
+    limit_names: Tuple[str, ...],
+) -> Optional[bool]:
+    if not hasattr(runtime, counter_name):
+        return None
+    counter = np.asarray(getattr(runtime, counter_name)).reshape(-1)
+    if counter.size != 1:
+        return None
+    for limit_name in limit_names:
+        if not hasattr(runtime, limit_name):
+            continue
+        limit = np.asarray(getattr(runtime, limit_name)).reshape(-1)
+        if limit.size == 1:
+            return float(counter[0]) >= float(limit[0])
+    return None
+
+
+def _inferred_overcooked_horizon(runtime: Any) -> Optional[int]:
+    runtime_type = type(runtime)
+    identifier = (
+        f"{runtime_type.__module__}.{runtime_type.__name__}".lower()
+    )
+    if "overcooked" not in identifier:
+        return None
+    if "_v4" in identifier:
+        return 60
+    if "_v3" in identifier:
+        return 200
+    return None
+
+
+def _runtime_horizon_limits(runtime: Any) -> Tuple[float, ...]:
+    limits = []
+    for _, current in _runtime_objects(runtime):
+        for name in (
+            "max_episode_steps",
+            "_max_episode_steps",
+            "max_episode_length",
+            "max_steps",
+            "_max_steps",
+            "episode_limit",
+            "horizon",
+        ):
+            if hasattr(current, name):
+                value = np.asarray(getattr(current, name)).reshape(-1)
+                if value.size == 1:
+                    limits.append(float(value[0]))
+                    break
+        else:
+            inferred = _inferred_overcooked_horizon(current)
+            if inferred is not None:
+                limits.append(float(inferred))
+    return tuple(limits)
+
+
+def _info_episode_lengths(info: Any) -> Tuple[float, ...]:
+    lengths = []
+    pending = list(info) if isinstance(info, (list, tuple)) else [info]
+    while pending:
+        value = pending.pop(0)
+        if not isinstance(value, Mapping):
+            continue
+        episode = value.get("episode")
+        if isinstance(episode, Mapping) and "l" in episode:
+            length = np.asarray(episode["l"]).reshape(-1)
+            if length.size == 1:
+                lengths.append(float(length[0]))
+        for name in ("terminal_info", "final_info"):
+            nested = value.get(name)
+            if isinstance(nested, (list, tuple)):
+                pending.extend(nested)
+            elif nested is not None:
+                pending.append(nested)
+    return tuple(lengths)
+
+
+def _runtime_at_horizon(
+    runtime: Any,
+    previous_runtime: Optional[Any] = None,
+    info: Any = None,
+) -> bool:
+    for _, current in _runtime_objects(runtime):
+        elapsed_status = _counter_limit_status(
+            current,
+            "_elapsed_steps",
+            ("max_episode_steps", "_max_episode_steps"),
+        )
+        if elapsed_status is True:
+            return True
+
+        env_step_status = _counter_limit_status(
+            current,
+            "env_step",
+            (
+                "max_episode_steps",
+                "_max_episode_steps",
+                "max_episode_length",
+                "max_steps",
+                "_max_steps",
+                "episode_limit",
+                "horizon",
+            ),
+        )
+        if env_step_status is True:
+            return True
+        if env_step_status is not None:
+            continue
+
+        inferred_limit = _inferred_overcooked_horizon(current)
+        if inferred_limit is not None and hasattr(current, "env_step"):
+            env_step = np.asarray(current.env_step).reshape(-1)
+            if env_step.size == 1 and float(env_step[0]) >= inferred_limit:
+                return True
+    runtimes = (runtime,) if previous_runtime is None else (
+        runtime,
+        previous_runtime,
+    )
+    limits = tuple(
+        limit
+        for candidate in runtimes
+        for limit in _runtime_horizon_limits(candidate)
+    )
+    if any(
+        episode_length >= limit
+        for episode_length in _info_episode_lengths(info)
+        for limit in limits
+    ):
+        return True
+    if previous_runtime is None:
+        return False
+    for _, current in _runtime_objects(previous_runtime):
+        elapsed_status = _counter_limit_status(
+            current,
+            "_elapsed_steps",
+            ("max_episode_steps", "_max_episode_steps"),
+        )
+        if elapsed_status is not None:
+            limit = getattr(
+                current,
+                "max_episode_steps",
+                getattr(current, "_max_episode_steps", None),
+            )
+            if float(current._elapsed_steps) + 1.0 >= float(limit):
+                return True
+
+        env_step_status = _counter_limit_status(
+            current,
+            "env_step",
+            (
+                "max_episode_steps",
+                "_max_episode_steps",
+                "max_episode_length",
+                "max_steps",
+                "_max_steps",
+                "episode_limit",
+                "horizon",
+            ),
+        )
+        if env_step_status is not None:
+            for name in (
+                "max_episode_steps",
+                "_max_episode_steps",
+                "max_episode_length",
+                "max_steps",
+                "_max_steps",
+                "episode_limit",
+                "horizon",
+            ):
+                if hasattr(current, name):
+                    if float(current.env_step) + 1.0 >= float(
+                        getattr(current, name)
+                    ):
+                        return True
+                    break
+            continue
+
+        inferred_limit = _inferred_overcooked_horizon(current)
+        if (
+            inferred_limit is not None
+            and hasattr(current, "env_step")
+            and float(current.env_step) + 1.0 >= inferred_limit
+        ):
+            return True
+    return False
+
+
+def _correct_delivery_threshold(runtime: Any) -> Optional[float]:
+    for _, current in _runtime_objects(runtime):
+        reward_list = getattr(current, "rewardList", None)
+        if not isinstance(reward_list, Mapping):
+            continue
+        normalized = {
+            str(name).lower().replace("_", " ").strip(): value
+            for name, value in reward_list.items()
+        }
+        if "correct delivery" not in normalized:
+            continue
+        threshold = float(normalized["correct delivery"])
+        step_penalty = float(normalized.get("step penalty", 0.0))
+        return threshold + min(0.0, step_penalty)
+    return None
+
+
+def _successful_horizon_serve(
+    runtime: Any,
+    action: ActionCandidate,
+    reward: float,
+) -> bool:
+    if "serve the dish" not in action.text.lower() or reward <= 0.0:
+        return False
+    threshold = _correct_delivery_threshold(runtime)
+    return reward >= threshold if threshold is not None else True
+
+
+def _classify_completion(
+    runtime: Any,
+    action: ActionCandidate,
+    done: bool,
+    reward: float,
+    info: Any,
+    previous_runtime: Optional[Any] = None,
+) -> Tuple[bool, bool, bool]:
+    explicit_success = _info_success(info)
+    horizon = _runtime_at_horizon(runtime, previous_runtime, info)
+    if explicit_success is True:
+        return True, False, horizon
+    if _info_is_truncated(info):
+        return False, True, horizon
+    if horizon:
+        goal_reached = (
+            explicit_success
+            if explicit_success is not None
+            else done and _successful_horizon_serve(
+                runtime,
+                action,
+                reward,
+            )
+        )
+        return bool(goal_reached), not bool(goal_reached), True
+    return bool(done), False, False
+
+
+def _set_completion_markers(
+    runtime: Any,
+    terminated: bool,
+    truncated: bool,
+) -> None:
+    for _, current in _runtime_objects(runtime):
+        if (
+            current is runtime
+            or hasattr(current, "_planu_terminated")
+            or hasattr(current, "_planu_truncated")
+        ):
+            current._planu_terminated = bool(terminated)
+            current._planu_truncated = (
+                bool(truncated) and not bool(terminated)
+            )
+
+
+def _active_completion_markers(
+    runtime: Any,
+) -> Optional[Tuple[bool, bool]]:
+    for _, current in _runtime_objects(runtime):
+        terminated = bool(getattr(current, "_planu_terminated", False))
+        truncated = bool(getattr(current, "_planu_truncated", False))
+        if terminated or truncated:
+            return terminated, truncated
+    return None
+
+
+def _transition_info(
+    raw_info: Any,
+    truncated: bool,
+    horizon: bool,
+) -> Mapping[str, Any]:
+    result = {"raw_info": raw_info}
+    if truncated and horizon:
+        result["truncation_reason"] = "environment_horizon"
+    return result
+
+
 class OvercookedAdapter:
     def __init__(
         self,
@@ -592,8 +896,7 @@ class OvercookedAdapter:
                 observation = self.envs.reset(seed=seed)
             except TypeError:
                 observation = self.envs.reset()
-        self.envs._planu_terminated = False
-        self.envs._planu_truncated = False
+        _set_completion_markers(self.envs, False, False)
         return EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=self.envs,
@@ -641,20 +944,30 @@ class OvercookedAdapter:
         observation, reward, done, info = preview_state.runtime.step(
             np.array([action.payload])
         )
-        truncated = _info_is_truncated(info)
-        terminated = _scalar_bool(done, "done") and not truncated
-        preview_state.runtime._planu_terminated = terminated
-        preview_state.runtime._planu_truncated = truncated
+        raw_reward = _scalar_reward(reward)
+        terminated, truncated, horizon = _classify_completion(
+            preview_state.runtime,
+            action,
+            _scalar_bool(done, "done"),
+            raw_reward,
+            info,
+            previous_runtime=state.runtime,
+        )
+        _set_completion_markers(
+            preview_state.runtime,
+            terminated,
+            truncated,
+        )
         next_state = EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=preview_state.runtime,
         )
         return TransitionResult(
             state=next_state,
-            reward=_scalar_reward(reward),
+            reward=raw_reward,
             terminated=terminated,
             truncated=truncated,
-            info={"raw_info": info},
+            info=_transition_info(info, truncated, horizon),
         )
 
     def step(
@@ -667,14 +980,20 @@ class OvercookedAdapter:
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])
         )
-        truncated = _info_is_truncated(info)
-        terminated = _scalar_bool(done, "done") and not truncated
+        raw_reward = _scalar_reward(reward)
+        terminated, truncated, horizon = _classify_completion(
+            state.runtime,
+            action,
+            _scalar_bool(done, "done"),
+            raw_reward,
+            info,
+            previous_runtime=before.runtime,
+        )
         if (
             "chop" in action.text
             and rng.random() < self.stochastic_probability
         ):
-            before.runtime._planu_terminated = False
-            before.runtime._planu_truncated = False
+            _set_completion_markers(before.runtime, False, False)
             return TransitionResult(
                 state=before,
                 reward=-0.001,
@@ -682,17 +1001,16 @@ class OvercookedAdapter:
                 truncated=False,
                 info={"raw_info": info},
             )
-        state.runtime._planu_terminated = terminated
-        state.runtime._planu_truncated = truncated
+        _set_completion_markers(state.runtime, terminated, truncated)
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
                 runtime=state.runtime,
             ),
-            reward=_scalar_reward(reward),
+            reward=raw_reward,
             terminated=terminated,
             truncated=truncated,
-            info={"raw_info": info},
+            info=_transition_info(info, truncated, horizon),
         )
 
     def state_key(self, state: EnvironmentState):
@@ -702,11 +1020,13 @@ class OvercookedAdapter:
         return observation, _runtime_step_signature(state.runtime)
 
     def is_terminal(self, state: EnvironmentState) -> bool:
+        markers = _active_completion_markers(state.runtime)
+        if markers is not None:
+            return markers[0] and not markers[1]
         if self.is_truncated(state):
             return False
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
-                "_planu_terminated",
                 "terminated",
                 "_terminated",
                 "done",
@@ -719,9 +1039,11 @@ class OvercookedAdapter:
         return False
 
     def is_truncated(self, state: EnvironmentState) -> bool:
+        markers = _active_completion_markers(state.runtime)
+        if markers is not None:
+            return markers[1] and not markers[0]
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
-                "_planu_truncated",
                 "truncated",
                 "_truncated",
             ):

@@ -177,6 +177,100 @@ class FakeVectorEnv:
         )
 
 
+class GraphEnvironment:
+    __module__ = "virtual_home.envs.graph_environment_v2"
+
+    def __init__(
+        self,
+        observation,
+        reward,
+        max_episode_length=50,
+        info=None,
+    ):
+        self.observation = np.asarray(observation).reshape(-1)
+        self.reward = reward
+        self.steps = max_episode_length - 1
+        self.max_episode_length = max_episode_length
+        self.info = {} if info is None else dict(info)
+
+    @property
+    def unwrapped(self):
+        return self
+
+    def step(self, action):
+        del action
+        self.steps += 1
+        done = self.steps >= self.max_episode_length
+        return (
+            np.array(self.observation, copy=True),
+            self.reward,
+            done,
+            dict(self.info),
+        )
+
+
+class FakeGymWrapper:
+    def __init__(self, env):
+        self.env = env
+
+    @property
+    def unwrapped(self):
+        return self.env.unwrapped
+
+    def step(self, action):
+        return self.env.step(action)
+
+
+class FakeVirtualHomeHorizonVectorEnv:
+    num_envs = 1
+
+    def __init__(self, observation, reward, info=None):
+        self.initial_observation = np.array(observation, copy=True)
+        self.reward = reward
+        self.info = info
+        self.envs = []
+        self.reset_calls = []
+        self.step_calls = []
+        self._new_inner()
+
+    def _new_inner(self):
+        self.envs = [
+            FakeGymWrapper(
+                GraphEnvironment(
+                    self.initial_observation[0],
+                    self.reward,
+                    info=self.info,
+                )
+            )
+        ]
+
+    def reset(self, **kwargs):
+        self.reset_calls.append(kwargs.get("seed"))
+        self._new_inner()
+        return np.array(self.initial_observation, copy=True)
+
+    def step(self, action):
+        self.step_calls.append(np.array(action, copy=True))
+        observation, reward, done, info = self.envs[0].step(action[0])
+        return (
+            observation[np.newaxis, :],
+            np.array([reward]),
+            np.array([done]),
+            [info],
+        )
+
+
+class AutoResetVirtualHomeHorizonVectorEnv(
+    FakeVirtualHomeHorizonVectorEnv
+):
+    def step(self, action):
+        result = super().step(action)
+        if bool(result[2][0]):
+            self._new_inner()
+            self.envs[0].env.steps = 0
+        return result
+
+
 class FixedRng:
     def __init__(self, value):
         self.value = value
@@ -454,7 +548,10 @@ def test_task_stochastic_failure_restores_runtime_and_observation(
     assert result.reward == -0.001
     assert result.terminated is False
     assert result.truncated is False
+    assert result.state.runtime._planu_terminated is False
+    assert result.state.runtime._planu_truncated is False
     assert adapter.is_terminal(result.state) is False
+    assert adapter.is_truncated(result.state) is False
     assert len(env.step_calls) == 1
 
 
@@ -560,6 +657,182 @@ def test_is_truncated_defaults_false_and_reads_explicit_runtime_state():
 
     state.runtime.envs[0]._truncated = True
     assert adapter.is_truncated(state) is True
+
+
+def test_virtualhome_reset_clears_both_completion_markers():
+    env = FakeVectorEnv(FOOD_INITIAL)
+    env._planu_terminated = True
+    env._planu_truncated = True
+    env.envs[0]._planu_terminated = True
+    env.envs[0]._planu_truncated = True
+    adapter = VirtualHomeAdapter(
+        env,
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+
+    state = adapter.reset()
+
+    assert state.runtime._planu_terminated is False
+    assert state.runtime._planu_truncated is False
+    assert state.runtime.envs[0]._planu_terminated is False
+    assert state.runtime.envs[0]._planu_truncated is False
+    assert adapter.is_terminal(state) is False
+    assert adapter.is_truncated(state) is False
+
+
+@pytest.mark.parametrize("reward", [0.0, 0.1])
+@pytest.mark.parametrize("transition_name", ["preview", "step"])
+def test_virtualhome_horizon_without_goal_is_truncated(
+    reward,
+    transition_name,
+):
+    env = FakeVirtualHomeHorizonVectorEnv(ENTERTAINMENT_INITIAL, reward)
+    adapter = VirtualHomeAdapter(
+        env,
+        VirtualHomeTask.ENTERTAINMENT,
+        0.0,
+        np.random.default_rng(1),
+    )
+    state = adapter.reset()
+    action = adapter.actions(state)[0]
+
+    result = getattr(adapter, transition_name)(
+        state,
+        action,
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
+    assert result.state.runtime._planu_terminated is False
+    assert result.state.runtime._planu_truncated is True
+    assert adapter.is_terminal(result.state) is False
+    assert adapter.is_truncated(result.state) is True
+
+
+@pytest.mark.parametrize("transition_name", ["preview", "step"])
+def test_virtualhome_goal_reward_at_horizon_remains_terminal(
+    transition_name,
+):
+    env = FakeVirtualHomeHorizonVectorEnv(FOOD_INITIAL, 1.0)
+    adapter = VirtualHomeAdapter(
+        env,
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+    state = adapter.reset()
+
+    result = getattr(adapter, transition_name)(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.terminated is True
+    assert result.truncated is False
+    assert "truncation_reason" not in result.info
+    assert result.state.runtime._planu_terminated is True
+    assert result.state.runtime._planu_truncated is False
+    assert adapter.is_terminal(result.state) is True
+    assert adapter.is_truncated(result.state) is False
+
+
+def test_virtualhome_explicit_time_limit_requires_explicit_goal_override():
+    truncated_env = FakeVirtualHomeHorizonVectorEnv(
+        FOOD_INITIAL,
+        1.0,
+        info={"TimeLimit.truncated": True},
+    )
+    truncated_adapter = VirtualHomeAdapter(
+        truncated_env,
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+    truncated_state = truncated_adapter.reset()
+
+    truncated = truncated_adapter.step(
+        truncated_state,
+        truncated_adapter.actions(truncated_state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert truncated.terminated is False
+    assert truncated.truncated is True
+
+    success_env = FakeVirtualHomeHorizonVectorEnv(
+        FOOD_INITIAL,
+        1.0,
+        info={"TimeLimit.truncated": True, "goal_reached": True},
+    )
+    success_adapter = VirtualHomeAdapter(
+        success_env,
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+    success_state = success_adapter.reset()
+
+    success = success_adapter.step(
+        success_state,
+        success_adapter.actions(success_state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert success.terminated is True
+    assert success.truncated is False
+
+
+def test_virtualhome_search_reports_environment_horizon():
+    adapter = VirtualHomeAdapter(
+        FakeVirtualHomeHorizonVectorEnv(ENTERTAINMENT_INITIAL, 0.1),
+        VirtualHomeTask.ENTERTAINMENT,
+        0.0,
+        np.random.default_rng(1),
+    )
+    search = PlanUSearch(
+        adapter,
+        ConstantActionScorer(),
+        virtualhome_config(
+            VirtualHomeTask.ENTERTAINMENT,
+            False,
+            max_iterations=1,
+            max_depth=2,
+        ),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(7))
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "environment_horizon"
+    assert result.state_path[-1].truncation_reason == "environment_horizon"
+
+
+def test_virtualhome_horizon_survives_vector_env_auto_reset():
+    env = AutoResetVirtualHomeHorizonVectorEnv(FOOD_INITIAL, 0.0)
+    adapter = VirtualHomeAdapter(
+        env,
+        VirtualHomeTask.FOOD,
+        0.0,
+        np.random.default_rng(1),
+    )
+    state = adapter.reset()
+
+    result = adapter.step(
+        state,
+        adapter.actions(state)[0],
+        np.random.default_rng(2),
+    )
+
+    assert result.state.runtime.envs[0].env.steps == 0
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.info["truncation_reason"] == "environment_horizon"
 
 
 @pytest.mark.parametrize(

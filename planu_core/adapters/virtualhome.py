@@ -855,6 +855,165 @@ def _info_is_truncated(info: Any) -> bool:
     return False
 
 
+def _info_success(info: Any) -> Optional[bool]:
+    values = info if isinstance(info, (list, tuple)) else (info,)
+    found = False
+    success = False
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for name in (
+            "is_success",
+            "success",
+            "goal_reached",
+            "goal_achieved",
+            "task_success",
+        ):
+            if name in value:
+                found = True
+                success = success or _scalar_bool(value[name], name)
+    return success if found else None
+
+
+def _counter_reached_limit(
+    runtime: Any,
+    counter_name: str,
+    limit_names: Tuple[str, ...],
+) -> bool:
+    if not hasattr(runtime, counter_name):
+        return False
+    counter = np.asarray(getattr(runtime, counter_name)).reshape(-1)
+    if counter.size != 1:
+        return False
+    for limit_name in limit_names:
+        if not hasattr(runtime, limit_name):
+            continue
+        limit = np.asarray(getattr(runtime, limit_name)).reshape(-1)
+        if limit.size == 1 and float(counter[0]) >= float(limit[0]):
+            return True
+    return False
+
+
+def _runtime_at_horizon(
+    runtime: Any,
+    previous_runtime: Optional[Any] = None,
+) -> bool:
+    for _, current in _runtime_objects(runtime):
+        runtime_type = type(current)
+        is_graph_environment = (
+            runtime_type.__name__ == "GraphEnvironment"
+            or "graph_environment" in runtime_type.__module__.lower()
+        )
+        if (
+            is_graph_environment
+            and _counter_reached_limit(
+                current,
+                "steps",
+                ("max_episode_length",),
+            )
+        ):
+            return True
+        if _counter_reached_limit(
+            current,
+            "_elapsed_steps",
+            ("max_episode_steps", "_max_episode_steps"),
+        ):
+            return True
+    if previous_runtime is None:
+        return False
+    for _, current in _runtime_objects(previous_runtime):
+        runtime_type = type(current)
+        is_graph_environment = (
+            runtime_type.__name__ == "GraphEnvironment"
+            or "graph_environment" in runtime_type.__module__.lower()
+        )
+        if (
+            is_graph_environment
+            and hasattr(current, "steps")
+            and hasattr(current, "max_episode_length")
+            and float(current.steps) + 1.0
+            >= float(current.max_episode_length)
+        ):
+            return True
+        if (
+            hasattr(current, "_elapsed_steps")
+            and (
+                hasattr(current, "max_episode_steps")
+                or hasattr(current, "_max_episode_steps")
+            )
+        ):
+            limit = getattr(
+                current,
+                "max_episode_steps",
+                getattr(current, "_max_episode_steps", None),
+            )
+            if float(current._elapsed_steps) + 1.0 >= float(limit):
+                return True
+    return False
+
+
+def _classify_completion(
+    runtime: Any,
+    done: bool,
+    reward: float,
+    info: Any,
+    previous_runtime: Optional[Any] = None,
+) -> Tuple[bool, bool, bool]:
+    explicit_success = _info_success(info)
+    horizon = _runtime_at_horizon(runtime, previous_runtime)
+    if explicit_success is True:
+        return True, False, horizon
+    if _info_is_truncated(info):
+        return False, True, horizon
+    if horizon:
+        goal_reached = (
+            explicit_success
+            if explicit_success is not None
+            else done and reward >= 1.0
+        )
+        return bool(goal_reached), not bool(goal_reached), True
+    return bool(done), False, False
+
+
+def _set_completion_markers(
+    runtime: Any,
+    terminated: bool,
+    truncated: bool,
+) -> None:
+    for _, current in _runtime_objects(runtime):
+        if (
+            current is runtime
+            or hasattr(current, "_planu_terminated")
+            or hasattr(current, "_planu_truncated")
+        ):
+            current._planu_terminated = bool(terminated)
+            current._planu_truncated = (
+                bool(truncated) and not bool(terminated)
+            )
+
+
+def _active_completion_markers(
+    runtime: Any,
+) -> Optional[Tuple[bool, bool]]:
+    for _, current in _runtime_objects(runtime):
+        terminated = bool(getattr(current, "_planu_terminated", False))
+        truncated = bool(getattr(current, "_planu_truncated", False))
+        if terminated or truncated:
+            return terminated, truncated
+    return None
+
+
+def _transition_info(
+    raw_info: Any,
+    truncated: bool,
+    horizon: bool,
+) -> Mapping[str, Any]:
+    result = {"raw_info": raw_info}
+    if truncated and horizon:
+        result["truncation_reason"] = "environment_horizon"
+    return result
+
+
 class VirtualHomeAdapter:
     def __init__(
         self,
@@ -889,8 +1048,7 @@ class VirtualHomeAdapter:
                 observation = self.envs.reset(seed=seed)
             except TypeError:
                 observation = self.envs.reset()
-        self.envs._planu_terminated = False
-        self.envs._planu_truncated = False
+        _set_completion_markers(self.envs, False, False)
         return EnvironmentState(
             observation=np.asarray(observation).copy(),
             runtime=self.envs,
@@ -937,19 +1095,28 @@ class VirtualHomeAdapter:
         observation, reward, done, info = preview_state.runtime.step(
             np.array([action.payload])
         )
-        truncated = _info_is_truncated(info)
-        terminated = _scalar_bool(done, "done") and not truncated
-        preview_state.runtime._planu_terminated = terminated
-        preview_state.runtime._planu_truncated = truncated
+        raw_reward = _scalar_reward(reward)
+        terminated, truncated, horizon = _classify_completion(
+            preview_state.runtime,
+            _scalar_bool(done, "done"),
+            raw_reward,
+            info,
+            previous_runtime=state.runtime,
+        )
+        _set_completion_markers(
+            preview_state.runtime,
+            terminated,
+            truncated,
+        )
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
                 runtime=preview_state.runtime,
             ),
-            reward=_scalar_reward(reward),
+            reward=raw_reward,
             terminated=terminated,
             truncated=truncated,
-            info={"raw_info": info},
+            info=_transition_info(info, truncated, horizon),
         )
 
     def step(
@@ -962,16 +1129,20 @@ class VirtualHomeAdapter:
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])
         )
-        truncated = _info_is_truncated(info)
-        terminated = _scalar_bool(done, "done") and not truncated
         raw_reward = _scalar_reward(reward)
+        terminated, truncated, horizon = _classify_completion(
+            state.runtime,
+            _scalar_bool(done, "done"),
+            raw_reward,
+            info,
+            previous_runtime=before.runtime,
+        )
         if (
             self.stochastic_probability > 0.0
             and self.task.stochastic_verb in action.text
             and rng.random() < self.stochastic_probability
         ):
-            before.runtime._planu_terminated = False
-            before.runtime._planu_truncated = False
+            _set_completion_markers(before.runtime, False, False)
             return TransitionResult(
                 state=before,
                 reward=-0.001,
@@ -979,8 +1150,7 @@ class VirtualHomeAdapter:
                 truncated=False,
                 info={"raw_info": info},
             )
-        state.runtime._planu_terminated = terminated
-        state.runtime._planu_truncated = truncated
+        _set_completion_markers(state.runtime, terminated, truncated)
         return TransitionResult(
             state=EnvironmentState(
                 observation=np.asarray(observation).copy(),
@@ -989,7 +1159,7 @@ class VirtualHomeAdapter:
             reward=raw_reward if raw_reward > 0.0 else -0.001,
             terminated=terminated,
             truncated=truncated,
-            info={"raw_info": info},
+            info=_transition_info(info, truncated, horizon),
         )
 
     def state_key(self, state: EnvironmentState):
@@ -999,11 +1169,13 @@ class VirtualHomeAdapter:
         return observation, _runtime_signature(state.runtime)
 
     def is_terminal(self, state: EnvironmentState) -> bool:
+        markers = _active_completion_markers(state.runtime)
+        if markers is not None:
+            return markers[0] and not markers[1]
         if self.is_truncated(state):
             return False
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
-                "_planu_terminated",
                 "terminated",
                 "_terminated",
                 "done",
@@ -1016,9 +1188,11 @@ class VirtualHomeAdapter:
         return False
 
     def is_truncated(self, state: EnvironmentState) -> bool:
+        markers = _active_completion_markers(state.runtime)
+        if markers is not None:
+            return markers[1] and not markers[0]
         for _, runtime in _runtime_objects(state.runtime):
             for name in (
-                "_planu_truncated",
                 "truncated",
                 "_truncated",
             ):
