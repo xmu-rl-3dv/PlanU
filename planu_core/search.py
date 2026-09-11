@@ -144,6 +144,18 @@ class PlanUSearch:
         self.curiosity = NullCuriosity() if curiosity is None else curiosity
         self.root: Optional[LanguageNode] = None
 
+    def _normalize_completion(
+        self,
+        state: EnvironmentState,
+        terminated: bool,
+        truncated: bool,
+    ) -> Tuple[bool, bool]:
+        if terminated:
+            return True, False
+        if truncated or self.adapter.is_truncated(state):
+            return False, True
+        return bool(self.adapter.is_terminal(state)), False
+
     def _state_fingerprint(self, state: EnvironmentState) -> Any:
         adapter_fingerprint = getattr(
             self.adapter,
@@ -154,12 +166,13 @@ class PlanUSearch:
             if callable(adapter_fingerprint):
                 return adapter_fingerprint(state)
             return pickle.dumps(
-                state.observation,
+                state,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
         except Exception as error:
             raise ValueError(
-                "cannot fingerprint observation for state key collision "
+                "cannot fingerprint full environment state for state key "
+                "collision "
                 "detection"
             ) from error
 
@@ -292,14 +305,13 @@ class PlanUSearch:
                 candidate,
                 copy.deepcopy(preview_rng),
             )
-            preview_terminated = (
-                preview.terminated
-                or self.adapter.is_terminal(preview.state)
+            preview_terminated, preview_truncated = (
+                self._normalize_completion(
+                    preview.state,
+                    preview.terminated,
+                    preview.truncated,
+                )
             )
-            preview_truncated = (
-                preview.truncated
-                or self.adapter.is_truncated(preview.state)
-            ) and not preview_terminated
             preview_truncation_reason = (
                 preview.info.get("truncation_reason")
                 if preview_truncated
@@ -402,9 +414,9 @@ class PlanUSearch:
     ) -> Tuple[TrajectoryResult, List[Any]]:
         state = self.adapter.reset(reset_seed)
         node = self._ensure_root(state)
-        root_terminated = self.adapter.is_terminal(state)
-        root_truncated = (
-            self.adapter.is_truncated(state) and not root_terminated
+        root_truncated = bool(self.adapter.is_truncated(state))
+        root_terminated = (
+            not root_truncated and bool(self.adapter.is_terminal(state))
         )
         if root_terminated or root_truncated:
             journal.snapshot_language(node)
@@ -479,13 +491,11 @@ class PlanUSearch:
                 raise ValueError("reward must be finite") from error
             if not math.isfinite(reward):
                 raise ValueError("reward must be finite")
-            terminated = result.terminated or self.adapter.is_terminal(
-                result.state
+            terminated, truncated = self._normalize_completion(
+                result.state,
+                result.terminated,
+                result.truncated,
             )
-            truncated = (
-                result.truncated
-                or self.adapter.is_truncated(result.state)
-            ) and not terminated
             truncation_reason = (
                 result.info.get("truncation_reason")
                 if truncated

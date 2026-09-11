@@ -184,6 +184,54 @@ def test_distribution_scorer_uses_legacy_criteria_and_injected_likelihoods():
     assert scorer.total_llm_tokenizer_call == 2
 
 
+def test_categorical_temperature_is_fixed_while_scalar_temperature_varies():
+    from planu_core.scorers import HuggingFaceActionScorer
+
+    def fake_likelihoods(prefix, completions):
+        del prefix
+        return (
+            list(range(len(completions))),
+            [1] * len(completions),
+            len(completions),
+        )
+
+    scorers = [
+        HuggingFaceActionScorer(
+            "fake/model",
+            normalization_mode="sum",
+            temperature=temperature,
+            tokenizer=object(),
+            model=object(),
+            device="cpu",
+            log_likelihood_helper=fake_likelihoods,
+        )
+        for temperature in (0.5, 2.0)
+    ]
+    candidates = [
+        ActionCandidate(0, 0, "first", {"prompt": "state"}),
+        ActionCandidate(1, 1, "second", {"prompt": "state"}),
+    ]
+
+    scalar_rows = [
+        scorer.score(object(), candidates)
+        for scorer in scorers
+    ]
+    categorical_rows = [
+        scorer.score_distributions(
+            object(),
+            candidates,
+            (0.1, 0.3, 0.5, 0.7, 0.9),
+        )
+        for scorer in scorers
+    ]
+
+    assert not np.allclose(scalar_rows[0], scalar_rows[1])
+    np.testing.assert_allclose(categorical_rows[0], categorical_rows[1])
+    expected = np.exp(np.arange(5, dtype=np.float64))
+    expected /= expected.sum()
+    np.testing.assert_allclose(categorical_rows[0][0], expected)
+
+
 def test_distribution_scorer_requires_five_levels():
     from planu_core.scorers import HuggingFaceActionScorer
 

@@ -248,6 +248,26 @@ class ConstantRootKeyAdapter(FakeAdapter):
         return "constant-root"
 
 
+class ConstantHiddenRuntimeKeyAdapter(ConstantRootKeyAdapter):
+    def reset(self, seed=None):
+        self.episode += 1
+        return EnvironmentState(
+            observation=np.array([0]),
+            runtime={"position": 0, "episode": self.episode},
+        )
+
+
+class UnfingerprintableRuntimeAdapter(FakeAdapter):
+    def reset(self, seed=None):
+        return EnvironmentState(
+            observation=np.array([0]),
+            runtime={"callback": lambda: None},
+        )
+
+    def state_key(self, state):
+        return "constant-root"
+
+
 class NoPreviewOutcomeAdapter(FakeAdapter):
     def preview(self, state, action, rng):
         result = super().preview(state, action, rng)
@@ -316,6 +336,51 @@ class TruncatedRootAdapter(AdapterTruncationOnlyAdapter):
             runtime={"position": 1},
         )
         return self.reset_state
+
+
+class LegacyHorizonTerminalAdapter(FakeAdapter):
+    def __init__(self, goal_reached=False):
+        super().__init__()
+        self.goal_reached = goal_reached
+
+    def preview(self, state, action, rng):
+        self.preview_calls += 1
+        return TransitionResult(
+            copy.deepcopy(state),
+            0.0,
+            False,
+            False,
+            {"record_outcome": False},
+        )
+
+    def step(self, state, action, rng):
+        self.actions_taken.append(action.key)
+        state.runtime["position"] = 1
+        state.observation = np.array([1])
+        return TransitionResult(
+            state,
+            1.0,
+            self.goal_reached,
+            not self.goal_reached,
+            {"truncation_reason": "horizon"}
+            if not self.goal_reached
+            else {},
+        )
+
+    def is_terminal(self, state):
+        return state.runtime["position"] >= 1
+
+    def is_truncated(self, state):
+        return state.runtime["position"] >= 1
+
+
+class LegacyHorizonRootAdapter(LegacyHorizonTerminalAdapter):
+    def reset(self, seed=None):
+        self.reset_seeds.append(seed)
+        return EnvironmentState(
+            observation=np.array([1]),
+            runtime={"position": 1},
+        )
 
 
 class LegacyThreeArgumentAdapter(FakeAdapter):
@@ -480,6 +545,41 @@ def test_preview_terminal_state_uses_adapter_terminal_normalization():
     assert position_two.outcome_visits == 1
 
 
+def test_explicit_horizon_truncation_precedes_legacy_terminal_check():
+    search = PlanUSearch(
+        LegacyHorizonTerminalAdapter(),
+        UniformScorer(),
+        PlanUConfig(max_depth=3),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(19))
+
+    final_node = result.state_path[-1]
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "horizon"
+    assert final_node.terminated is False
+    assert final_node.truncated is True
+    assert final_node.truncation_reason == "horizon"
+
+
+def test_explicit_goal_at_horizon_remains_terminal():
+    search = PlanUSearch(
+        LegacyHorizonTerminalAdapter(goal_reached=True),
+        UniformScorer(),
+        PlanUConfig(max_depth=3),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(20))
+
+    final_node = result.state_path[-1]
+    assert result.terminated is True
+    assert result.truncated is False
+    assert result.truncation_reason is None
+    assert final_node.terminated is True
+    assert final_node.truncated is False
+
+
 def test_max_depth_exhaustion_marks_final_state_and_result_truncated():
     search = PlanUSearch(
         FakeAdapter(),
@@ -548,6 +648,22 @@ def test_truncated_root_returns_empty_with_environment_reason():
     assert search.root.truncation_reason == "environment_truncated"
     assert adapter.action_calls == 0
     assert scorer.calls == 0
+
+
+def test_pure_horizon_root_precedes_legacy_terminal_check():
+    search = PlanUSearch(
+        LegacyHorizonRootAdapter(),
+        UniformScorer(),
+        PlanUConfig(),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(21))
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "environment_truncated"
+    assert search.root.terminated is False
+    assert search.root.truncated is True
 
 
 def test_preview_and_post_step_use_adapter_truncation_state():
@@ -944,6 +1060,50 @@ def test_root_state_key_collision_raises_without_replacing_root():
 
     assert search.root is root
     np.testing.assert_array_equal(root.state, [1])
+
+
+def test_full_state_fingerprint_detects_hidden_runtime_collision():
+    adapter = ConstantHiddenRuntimeKeyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=True),
+    )
+    search._ensure_root(adapter.reset())
+
+    with pytest.raises(ValueError, match="state key collision"):
+        search._ensure_root(adapter.reset())
+
+
+def test_hidden_runtime_collision_merges_when_debugging_is_disabled():
+    adapter = ConstantHiddenRuntimeKeyAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=False),
+    )
+    root = search._ensure_root(adapter.reset())
+
+    assert search._ensure_root(adapter.reset()) is root
+
+
+def test_unfingerprintable_full_state_errors_only_in_debug_mode():
+    adapter = UnfingerprintableRuntimeAdapter()
+    regular_search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=False),
+    )
+
+    regular_search._ensure_root(adapter.reset())
+
+    debug_search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(debug_state_keys=True),
+    )
+    with pytest.raises(ValueError, match="full environment state"):
+        debug_search._ensure_root(adapter.reset())
 
 
 def test_adapter_state_fingerprint_is_preferred_over_pickle():

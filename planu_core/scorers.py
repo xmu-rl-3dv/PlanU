@@ -205,6 +205,7 @@ class HuggingFaceActionScorer:
         self,
         prefix: str,
         completions: Sequence[str],
+        temperature: Optional[float] = None,
     ) -> np.ndarray:
         helper = (
             self._teacher_forced_log_likelihoods
@@ -226,7 +227,7 @@ class HuggingFaceActionScorer:
             lengths,
             completions,
             self.normalization_mode,
-            self.temperature,
+            self.temperature if temperature is None else temperature,
         )
 
     def score(
@@ -269,6 +270,7 @@ class HuggingFaceActionScorer:
                 self._normalized_completion_scores(
                     prefix,
                     LEGACY_DISTRIBUTION_CRITERIA,
+                    temperature=1.0,
                 )
             )
         return rows
