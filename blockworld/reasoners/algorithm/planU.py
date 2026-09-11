@@ -80,6 +80,7 @@ class PlanU(SearchAlgorithm):
         self.n_iters = n_iters
         self.output_trace_in_each_iter = output_trace_in_each_iter
         self.seed = seed
+        self.rng = np.random.default_rng(seed)
         self.disable_tqdm = disable_tqdm
         self.config = blockworld_config(
             n_iters=n_iters,
@@ -116,9 +117,8 @@ class PlanU(SearchAlgorithm):
             self.config,
         )
         self.search = search
-        rng = np.random.default_rng(self.seed)
         iterations = [
-            search.run_iteration(index, rng)
+            search.run_iteration(index, self.rng)
             for index in range(self.n_iters)
         ]
         assert search.root is not None

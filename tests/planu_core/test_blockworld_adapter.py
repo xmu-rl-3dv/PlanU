@@ -149,7 +149,8 @@ def test_step_forwards_fast_details_node_view_aux_and_supplied_rng():
     action = adapter.actions(state, state_visit_count=1)[0]
     rng = np.random.default_rng(42)
 
-    result = adapter.step(state, action, rng, state_visit_count=3)
+    adapter.prepare_step(state, action, state_visit_count=3)
+    result = adapter.step(state, action, rng)
 
     node, payload, kwargs = search_config.reward_call
     assert node is result.info["node_view"]
@@ -228,15 +229,16 @@ def test_repeated_steps_derive_reward_visit_count_from_core_argument():
     state = adapter.reset()
     action = adapter.actions(state, state_visit_count=1)[0]
 
-    results = [
-        adapter.step(
-            state,
-            action,
-            np.random.default_rng(seed),
-            state_visit_count=seed,
+    results = []
+    for seed in range(3):
+        adapter.prepare_step(state, action, state_visit_count=seed)
+        results.append(
+            adapter.step(
+                state,
+                action,
+                np.random.default_rng(seed),
+            )
         )
-        for seed in range(3)
-    ]
 
     assert search_config.reward_visits == [0, 1, 2]
     assert "node_view" not in action.metadata
@@ -274,18 +276,10 @@ def test_different_actions_receive_core_reward_visit_count():
     state = adapter.reset()
     first, second = adapter.actions(state, state_visit_count=1)
 
-    adapter.step(
-        state,
-        first,
-        np.random.default_rng(1),
-        state_visit_count=0,
-    )
-    adapter.step(
-        state,
-        second,
-        np.random.default_rng(2),
-        state_visit_count=1,
-    )
+    adapter.prepare_step(state, first, state_visit_count=0)
+    adapter.step(state, first, np.random.default_rng(1))
+    adapter.prepare_step(state, second, state_visit_count=1)
+    adapter.step(state, second, np.random.default_rng(2))
 
     assert "node_view" not in first.metadata
     assert "node_view" not in second.metadata
@@ -722,6 +716,36 @@ def test_blockworld_wrapper_executes_shared_search_and_returns_best_trace(
     assert len(result.tree_state.children["move"].children) == 2
     assert search_config.fast_nodes[0].cum_rewards == []
     assert search_config.reward_visits == [0, 1]
+
+
+def test_blockworld_wrapper_reuses_rng_across_benchmark_examples(monkeypatch):
+    module, _ = _load_blockworld_wrapper(monkeypatch)
+
+    class RandomDrawWorld(WrapperWorld):
+        def step(self, state, action):
+            draw = int(self.rng.integers(0, 1_000_000))
+            return BlockState(1, str(draw), ""), {"success": True}
+
+    def run_two_examples():
+        algorithm = module.PlanU(n_iters=1, depth_limit=1, seed=37)
+        world = RandomDrawWorld()
+        config = WrapperSearchConfig()
+        return [
+            algorithm(world, config).terminal_state.blocks_state,
+            algorithm(world, config).terminal_state.blocks_state,
+        ]
+
+    expected_rng = np.random.default_rng(37)
+    expected = [
+        str(int(expected_rng.integers(0, 1_000_000))),
+        str(int(expected_rng.integers(0, 1_000_000))),
+    ]
+    first_wrapper = run_two_examples()
+    second_wrapper = run_two_examples()
+
+    assert first_wrapper == expected
+    assert first_wrapper[1] != first_wrapper[0]
+    assert second_wrapper == first_wrapper
 
 
 def test_blockworld_wrapper_uses_best_nonterminal_and_handles_empty_path(

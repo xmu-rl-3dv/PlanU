@@ -1,13 +1,18 @@
 import copy
 from dataclasses import fields
+import inspect
 
 import numpy as np
 import pytest
 
 import planu_core.search as search_module
 from planu_core import PlanUConfig, SelectionSchedule
+from planu_core.adapters.blockworld import BlockWorldAdapter
+from planu_core.adapters.overcooked import OvercookedAdapter
+from planu_core.adapters.virtualhome import VirtualHomeAdapter
 from planu_core.interfaces import (
     ActionCandidate,
+    EnvironmentAdapter,
     EnvironmentState,
     TransitionResult,
 )
@@ -66,8 +71,7 @@ class StochasticAdapter(FakeAdapter):
         state.observation = np.array([1])
         return TransitionResult(state, 0.0, False, False)
 
-    def step(self, state, action, rng, state_visit_count=0):
-        del state_visit_count
+    def step(self, state, action, rng):
         self.actions_taken.append(action.key)
         self.step_calls += 1
         position = 1 if self.step_calls % 2 else 2
@@ -96,8 +100,7 @@ class BranchingAdapter(FakeAdapter):
         self.preview_start_positions.append(state.runtime["position"])
         return self._move(copy.deepcopy(state), action)
 
-    def step(self, state, action, rng, state_visit_count=0):
-        del state_visit_count
+    def step(self, state, action, rng):
         self.actions_taken.append(action.key)
         return self._move(state, action)
 
@@ -138,8 +141,7 @@ class InPlaceObservationAdapter(FakeAdapter):
             {"record_outcome": False},
         )
 
-    def step(self, state, action, rng, state_visit_count=0):
-        del state_visit_count
+    def step(self, state, action, rng):
         self.actions_taken.append(action.key)
         self._move_in_place(state)
         return TransitionResult(state, 1.0, False, False)
@@ -155,13 +157,8 @@ class ConfigurableRewardAdapter(FakeAdapter):
         super().__init__()
         self.step_reward = 1.0
 
-    def step(self, state, action, rng, state_visit_count=0):
-        result = super().step(
-            state,
-            action,
-            rng,
-            state_visit_count=state_visit_count,
-        )
+    def step(self, state, action, rng):
+        result = super().step(state, action, rng)
         result.reward = self.step_reward
         return result
 
@@ -221,6 +218,27 @@ class AdapterTerminalOnlyAdapter(FakeAdapter):
         )
 
 
+class LegacyThreeArgumentAdapter(FakeAdapter):
+    def step(self, state, action, rng):
+        self.actions_taken.append(action.key)
+        return self._transition(state)
+
+
+class VisitAwareThreeArgumentAdapter(LegacyThreeArgumentAdapter):
+    def __init__(self):
+        super().__init__()
+        self.step_events = []
+
+    def prepare_step(self, state, action, state_visit_count):
+        self.step_events.append(
+            ("prepare", state.runtime["position"], action.key, state_visit_count)
+        )
+
+    def step(self, state, action, rng):
+        self.step_events.append(("step", state.runtime["position"], action.key))
+        return super().step(state, action, rng)
+
+
 def test_search_types_are_exported_from_package():
     import planu_core
 
@@ -238,10 +256,65 @@ def test_search_types_are_exported_from_package():
     ]
 
 
+def test_environment_adapter_step_has_three_argument_protocol():
+    assert list(inspect.signature(EnvironmentAdapter.step).parameters) == [
+        "self",
+        "state",
+        "action",
+        "rng",
+    ]
+
+
+@pytest.mark.parametrize(
+    "adapter_type",
+    [OvercookedAdapter, VirtualHomeAdapter, BlockWorldAdapter],
+)
+def test_concrete_adapters_expose_three_argument_step(adapter_type):
+    assert list(inspect.signature(adapter_type.step).parameters) == [
+        "self",
+        "state",
+        "action",
+        "rng",
+    ]
+
+
 def test_root_is_initially_none():
     search = PlanUSearch(FakeAdapter(), UniformScorer(), PlanUConfig())
 
     assert search.root is None
+
+
+def test_search_supports_legacy_three_argument_step_adapter():
+    adapter = LegacyThreeArgumentAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(1))
+
+    assert result.actions == ["advance"]
+    assert adapter.actions_taken == ["advance"]
+
+
+def test_search_calls_optional_visit_hook_immediately_before_step():
+    adapter = VisitAwareThreeArgumentAdapter()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+    )
+
+    search.run_iteration(0, np.random.default_rng(2))
+    search.run_iteration(1, np.random.default_rng(3))
+
+    assert adapter.step_events == [
+        ("prepare", 0, "advance", 0),
+        ("step", 0, "advance"),
+        ("prepare", 0, "advance", 1),
+        ("step", 0, "advance"),
+    ]
 
 
 def test_two_step_run_merges_preview_and_execution_then_backs_up():

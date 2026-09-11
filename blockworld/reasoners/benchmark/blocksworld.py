@@ -142,6 +142,8 @@ class BWEvaluator(Evaluator):
 
         match = re.match(on_pattern, cond_str)
         if match:
+            color1 = match.group(1)
+            color2 = match.group(3)
             block1 = f"{color1} block"
             block2 = f"{color2} block"
             if block1 not in bd or block2 not in bd:

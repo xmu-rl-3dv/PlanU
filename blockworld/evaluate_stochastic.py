@@ -10,8 +10,18 @@ import re
 import sys
 from typing import Any, NamedTuple, Optional, Tuple
 
-import numpy as np
 
+def _preconfigure_cuda_visibility(argv):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("-g", "--gpu")
+    args, _ = parser.parse_known_args(argv)
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+
+
+_preconfigure_cuda_visibility(sys.argv[1:])
+
+import numpy as np
 
 PLANU_ROOT = str(Path(__file__).resolve().parents[1])
 if PLANU_ROOT not in sys.path:
@@ -303,7 +313,6 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     version = f"v{args.version}"
     steps = args.steps
     prompt_path, data_path = benchmark_paths(version, steps)

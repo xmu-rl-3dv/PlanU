@@ -278,10 +278,9 @@ def test_environment_adapter_protocol_matches_stateful_contract():
                 "state": EnvironmentState,
                 "action": ActionCandidate,
                 "rng": np.random.Generator,
-                "state_visit_count": int,
                 "return": TransitionResult,
             },
-            {"state_visit_count": 0},
+            {},
         ),
         "state_key": (
             {"state": EnvironmentState, "return": Hashable},

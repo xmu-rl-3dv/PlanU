@@ -276,11 +276,17 @@ class PlanUSearch:
                 rng,
                 novelty,
             )
+            prepare_step = getattr(self.adapter, "prepare_step", None)
+            if callable(prepare_step):
+                prepare_step(
+                    state,
+                    action_node.action,
+                    max(0, node.visit_count - 1),
+                )
             result = self.adapter.step(
                 state,
                 action_node.action,
                 rng,
-                state_visit_count=max(0, node.visit_count - 1),
             )
             try:
                 reward = float(result.reward)

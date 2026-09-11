@@ -29,4 +29,4 @@ setup(name='llm-reasoners',
                         'google-generativeai',
                         'anthropic'],
       include_package_data=True,
-      python_requires='>=3.10')
+      python_requires='>=3.9')

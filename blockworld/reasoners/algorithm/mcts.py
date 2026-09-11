@@ -4,7 +4,7 @@ import pickle
 from os import PathLike
 import math
 from copy import deepcopy
-from typing import Generic, Optional, NamedTuple, Callable, Hashable
+from typing import Generic, Optional, NamedTuple, Callable, Hashable, Union
 import itertools
 from abc import ABC
 from abc import ABC
@@ -125,7 +125,7 @@ class MCTS(SearchAlgorithm, Generic[State, Action, Example]):
                  n_iters: int = 10,
                  cum_reward: Callable[[list[float]], float] = sum,
                  calc_q: Callable[[list[float]], float] = np.mean,
-                 simulate_strategy: str | Callable[[list[float]], int] = 'max',
+                 simulate_strategy: Union[str, Callable[[list[float]], int]] = 'max',
                  output_strategy: str = 'max_reward',
                  uct_with_fast_reward: bool = True,
                  aggregator: Optional[MCTSAggregation] = None,

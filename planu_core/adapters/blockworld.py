@@ -122,6 +122,7 @@ class BlockWorldAdapter:
     def __init__(self, world_model: Any, search_config: Any) -> None:
         self.world_model = world_model
         self.search_config = search_config
+        self._pending_step_context = None
 
     def reset(self, seed: Optional[int] = None) -> EnvironmentState:
         if seed is not None and hasattr(self.world_model, "rng"):
@@ -195,13 +196,34 @@ class BlockWorldAdapter:
             info={"record_outcome": False},
         )
 
+    def prepare_step(
+        self,
+        state: EnvironmentState,
+        action: ActionCandidate,
+        state_visit_count: int,
+    ) -> None:
+        self._pending_step_context = (
+            self.state_key(state),
+            action.key,
+            max(0, state_visit_count),
+        )
+
     def step(
         self,
         state: EnvironmentState,
         action: ActionCandidate,
         rng: np.random.Generator,
-        state_visit_count: int = 0,
     ) -> TransitionResult:
+        pending_context = self._pending_step_context
+        self._pending_step_context = None
+        state_visit_count = 0
+        if pending_context is not None:
+            pending_state, pending_action, pending_count = pending_context
+            if (
+                pending_state == self.state_key(state)
+                and pending_action == action.key
+            ):
+                state_visit_count = pending_count
         if hasattr(self.world_model, "rng"):
             self.world_model.rng = rng
         raw_result = self.world_model.step(

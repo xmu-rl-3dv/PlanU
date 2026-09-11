@@ -389,7 +389,7 @@ def test_preview_isolated_clone_uses_raw_reward():
     assert result.reward == 0.0
 
 
-def test_step_ignores_visit_count_and_preserves_reward_flooring():
+def test_step_preserves_reward_flooring():
     env = FakeVectorEnv(FOOD_INITIAL, reward=0.0)
     rng = FixedRng(0.9)
     adapter = VirtualHomeAdapter(
@@ -404,7 +404,6 @@ def test_step_ignores_visit_count_and_preserves_reward_flooring():
         state,
         adapter.actions(state)[0],
         rng,
-        state_visit_count=37,
     )
 
     assert result.reward == -0.001

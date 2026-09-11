@@ -555,7 +555,7 @@ def test_chop_success_uses_actual_transition_and_non_chop_does_not_draw():
     assert rng.calls == 1
 
 
-def test_step_ignores_visit_count_and_uses_supplied_rng():
+def test_step_uses_supplied_rng():
     env = FakeVectorEnv()
     adapter_rng = FixedRng(0.0)
     supplied_rng = FixedRng(1.0)
@@ -566,7 +566,6 @@ def test_step_ignores_visit_count_and_uses_supplied_rng():
         state,
         adapter.actions(state)[-1],
         supplied_rng,
-        state_visit_count=37,
     )
 
     assert supplied_rng.calls == 1

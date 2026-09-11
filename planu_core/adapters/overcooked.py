@@ -647,9 +647,7 @@ class OvercookedAdapter:
         state: EnvironmentState,
         action: ActionCandidate,
         rng: np.random.Generator,
-        state_visit_count: int = 0,
     ) -> TransitionResult:
-        del state_visit_count
         before = self.clone(state)
         observation, reward, done, info = state.runtime.step(
             np.array([action.payload])

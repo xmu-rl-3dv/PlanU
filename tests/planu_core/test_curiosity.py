@@ -109,8 +109,7 @@ class NoveltyAdapter(FakeAdapter):
         self.preview_calls += 1
         return self._move(copy.deepcopy(state), action)
 
-    def step(self, state, action, rng, state_visit_count=0):
-        del state_visit_count
+    def step(self, state, action, rng):
         self.actions_taken.append(action.key)
         return self._move(state, action)
 
