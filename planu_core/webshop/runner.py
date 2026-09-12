@@ -169,7 +169,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run WebShop tasks through the shared PlanU core.",
     )
-    parser.add_argument("--backend", default="qwen-plus")
+    parser.add_argument(
+        "--backend",
+        default=os.environ.get("PLANU_MODEL", "qwen-plus"),
+    )
     parser.add_argument(
         "--base-url",
         "--model-base-url",

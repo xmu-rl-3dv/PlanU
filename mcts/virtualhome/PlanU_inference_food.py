@@ -70,7 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-model",
         type=str,
-        default="meta-llama/Meta-Llama-3-8B-Instruct",
+        default=os.environ.get(
+            "PLANU_MODEL",
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        ),
     )
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--num-envs", type=int, default=1)

@@ -187,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-model",
         action="store",
         type=str,
-        default=LEGACY_BASE_MODEL,
+        default=os.environ.get("PLANU_MODEL", LEGACY_BASE_MODEL),
     )
     parser.add_argument(
         "--temperature",

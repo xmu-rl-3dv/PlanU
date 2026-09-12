@@ -2,7 +2,6 @@
 set -euo pipefail
 
 python -m planu_core.webshop.runner \
-  --backend qwen-plus \
   --temperature 0.8 \
   --prompt-mode cot \
   --n-generate-sample 5 \

@@ -1,4 +1,15 @@
-webshop/logs/
+.DS_Store
+.venv/
+README.zh-CN.md
+*.egg-info/
 *.log
 __pycache__/
 *.pyc
+external/
+logs/
+results/
+results_new/
+rnd_results/
+rnd_reward/
+webshop/logs/
+workdir/

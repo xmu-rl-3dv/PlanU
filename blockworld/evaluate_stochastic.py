@@ -79,7 +79,10 @@ def parse_args(argv=None):
                         help="Probability that a BlockWorld action succeeds.")
     parser.add_argument(
         "--model",
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        default=os.environ.get(
+            "PLANU_MODEL",
+            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        ),
         help="Hugging Face model and tokenizer identifier.",
     )
     parser.add_argument(
