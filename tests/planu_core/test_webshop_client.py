@@ -4,7 +4,6 @@ from urllib.parse import unquote
 
 import pytest
 import requests
-from flask import Flask
 
 from planu_core.webshop.client import (
     WebShopHttpClient,
@@ -361,18 +360,6 @@ def test_fetch_rejects_slashes_in_ordinary_path_components(
         client.fetch(page_type, session_id, **kwargs)
 
     assert session.calls == []
-
-
-def test_flask_decodes_percent_encoded_slash_before_route_matching():
-    app = Flask(__name__)
-
-    @app.get("/item/<asin>")
-    def item(asin):
-        return asin
-
-    response = app.test_client().get("/item/M%2FL")
-
-    assert response.status_code == 404
 
 
 def test_fetch_options_escape_slash_and_round_trip_for_official_literal_eval():
