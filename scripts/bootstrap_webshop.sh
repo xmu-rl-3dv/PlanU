@@ -139,10 +139,19 @@ server_reachable() {
     "http://127.0.0.1:3000/fixed_1" >/dev/null
 }
 
+configure_java_runtime() {
+  JAVA_HOME="${ENV_PREFIX}/lib/jvm"
+  [[ -x "${JAVA_HOME}/bin/java" ]] ||
+    fail "Conda Java runtime is missing: ${JAVA_HOME}/bin/java"
+  export JAVA_HOME
+  export PATH="${JAVA_HOME}/bin:${PATH}"
+}
+
 verify_server_startup() {
   local attempt=0
   local log_path="${ENV_PREFIX}/bootstrap-server.log"
 
+  configure_java_runtime
   if server_reachable; then
     fail "port 3000 is already serving a process not started by this bootstrap"
   fi

@@ -269,9 +269,15 @@ def local_smoke_environment(tmp_path, *, artifact_mode="valid", resistant=False)
     (webshop_root / ".git").mkdir(parents=True)
     env_prefix = webshop_root / "custom-env"
     (env_prefix / "bin").mkdir(parents=True)
+    java_bin = env_prefix / "lib" / "jvm" / "bin"
+    java_bin.mkdir(parents=True)
+    write_executable(java_bin / "java", "exit 0\n")
     server_pid_log = tmp_path / "server.pid"
     child_pid_log = tmp_path / "child.pid"
+    server_env_log = tmp_path / "server.env"
     server_source = r"""
+printf 'JAVA_HOME=%s\nPATH=%s\n' \
+  "${JAVA_HOME:-}" "$PATH" > "$FAKE_SERVER_ENV_LOG"
 printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
 if [[ "${FAKE_RESIST_TERM:-0}" == "1" ]]; then
   trap '' TERM INT
@@ -340,6 +346,7 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_PROJECT_ROOT=str(ROOT),
         FAKE_REAL_PYTHON=sys.executable,
         FAKE_RESIST_TERM="1" if resistant else "0",
+        FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SERVER_URL="http://127.0.0.1:3000",
         FAKE_WEBSHOP_ROOT=str(webshop_root),
@@ -351,6 +358,94 @@ kill -0 "$server_pid" 2>/dev/null
         WEBSHOP_STOP_ATTEMPTS="2",
     )
     return environment, command_log, server_pid_log, child_pid_log
+
+
+def bootstrap_server_environment(tmp_path, *, include_java=True):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    for relative_path in (
+        "data/items_shuffle_1000.json",
+        "data/items_ins_v2_1000.json",
+        "data/items_human_ins.json",
+        "search_engine/resources/documents.jsonl",
+        "search_engine/indexes/segments_1",
+        "search_engine/indexes/_0.si",
+    ):
+        path = webshop_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("nonempty\n", encoding="utf-8")
+    env_prefix = webshop_root / "custom-env"
+    (env_prefix / "bin").mkdir(parents=True)
+    if include_java:
+        java_bin = env_prefix / "lib" / "jvm" / "bin"
+        java_bin.mkdir(parents=True)
+        write_executable(java_bin / "java", "exit 0\n")
+    server_pid_log = tmp_path / "server.pid"
+    server_env_log = tmp_path / "server.env"
+    write_executable(
+        env_prefix / "bin" / "python",
+        """
+if [[ "$*" == *"platform.python_version"* ]]; then
+  printf '3.8.13\n'
+elif [[ "$*" == *"import web_agent_site.app"* ]]; then
+  exit 0
+elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
+  printf 'JAVA_HOME=%s\nPATH=%s\n' \
+    "${JAVA_HOME:-}" "$PATH" > "$FAKE_SERVER_ENV_LOG"
+  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+""",
+    )
+    (env_prefix / (
+        ".planu-webshop-small-"
+        "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+    )).touch()
+    git_log = tmp_path / "git.log"
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*)
+    if [[ "$*" != *":(exclude)custom-env"* ]]; then
+      printf '?? custom-env/\n'
+    fi
+    ;;
+  *"cat-file -e"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"symbolic-ref -q HEAD"*) exit 1 ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+    write_executable(
+        fake_bin / "curl",
+        """
+[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
+kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
+""",
+    )
+    environment = script_environment(
+        fake_bin,
+        FAKE_GIT_LOG=str(git_log),
+        FAKE_SERVER_ENV_LOG=str(server_env_log),
+        FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
+        WEBSHOP_ENV_PREFIX=str(env_prefix),
+        WEBSHOP_ROOT=str(webshop_root),
+    )
+    return environment, webshop_root, env_prefix, git_log, server_env_log
 
 
 class Closeable:
@@ -2007,77 +2102,16 @@ esac
     assert "index" in completed.stderr.lower()
 
 
-def test_webshop_bootstrap_canonicalizes_relative_root_and_custom_env(
-    tmp_path,
-):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    webshop_root = tmp_path / "WebShop"
-    (webshop_root / ".git").mkdir(parents=True)
-    for relative_path in (
-        "data/items_shuffle_1000.json",
-        "data/items_ins_v2_1000.json",
-        "data/items_human_ins.json",
-        "search_engine/resources/documents.jsonl",
-        "search_engine/indexes/segments_1",
-        "search_engine/indexes/_0.si",
-    ):
-        path = webshop_root / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("nonempty\n", encoding="utf-8")
-    env_prefix = webshop_root / "custom-env"
-    (env_prefix / "bin").mkdir(parents=True)
-    server_pid_log = tmp_path / "server.pid"
-    write_executable(
-        env_prefix / "bin" / "python",
-        """
-if [[ "$*" == *"platform.python_version"* ]]; then
-  printf '3.8.13\n'
-elif [[ "$*" == *"import web_agent_site.app"* ]]; then
-  exit 0
-elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
-  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
-  trap 'exit 0' TERM INT
-  while true; do sleep 1; done
-fi
-""",
-    )
-    (env_prefix / (
-        ".planu-webshop-small-"
-        "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
-    )).touch()
-    git_log = tmp_path / "git.log"
-    write_executable(
-        fake_bin / "git",
-        """
-printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
-case "$*" in
-  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
-  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
-  *"remote get-url origin"*)
-    printf 'https://github.com/princeton-nlp/WebShop.git\n'
-    ;;
-  *"status --porcelain"*)
-    if [[ "$*" != *":(exclude)custom-env"* ]]; then
-      printf '?? custom-env/\n'
-    fi
-    ;;
-  *"cat-file -e"*) ;;
-  *"rev-parse HEAD"*)
-    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
-    ;;
-  *"symbolic-ref -q HEAD"*) exit 1 ;;
-esac
-""",
-    )
-    write_executable(fake_bin / "conda", "exit 0\n")
-    write_executable(
-        fake_bin / "curl",
-        """
-[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
-kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
-""",
-    )
+def test_webshop_bootstrap_configures_resolved_conda_java_for_server(tmp_path):
+    (
+        environment,
+        webshop_root,
+        env_prefix,
+        git_log,
+        server_env_log,
+    ) = bootstrap_server_environment(tmp_path)
+    environment["WEBSHOP_ENV_PREFIX"] = "WebShop/custom-env"
+    environment["WEBSHOP_ROOT"] = "WebShop"
 
     completed = subprocess.run(
         ["bash", str(WEBSHOP_BOOTSTRAP)],
@@ -2085,20 +2119,38 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         check=False,
         capture_output=True,
         text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_GIT_LOG=str(git_log),
-            FAKE_SERVER_PID_LOG=str(server_pid_log),
-            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
-            WEBSHOP_ENV_PREFIX="WebShop/custom-env",
-            WEBSHOP_ROOT="WebShop",
-        ),
+        env=environment,
         timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stderr
     assert str(webshop_root.resolve()) in completed.stdout
     assert ":(exclude)custom-env" in git_log.read_text(encoding="utf-8")
+    java_home = env_prefix.resolve() / "lib" / "jvm"
+    assert server_env_log.read_text(encoding="utf-8").splitlines() == [
+        "JAVA_HOME={}".format(java_home),
+        "PATH={}:{}".format(java_home / "bin", environment["PATH"]),
+    ]
+
+
+def test_webshop_bootstrap_fails_clearly_when_conda_java_is_missing(tmp_path):
+    environment, _, env_prefix, _, server_env_log = (
+        bootstrap_server_environment(tmp_path, include_java=False)
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    java = env_prefix.resolve() / "lib" / "jvm" / "bin" / "java"
+    assert completed.returncode != 0
+    assert str(java) in completed.stderr
+    assert not server_env_log.exists()
 
 
 def test_webshop_bootstrap_is_idempotent_after_verified_small_setup(tmp_path):
@@ -2152,7 +2204,9 @@ if [[ "${1:-}" == "create" ]]; then
     fi
     shift
   done
-  mkdir -p "$prefix/bin"
+  mkdir -p "$prefix/bin" "$prefix/lib/jvm/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$prefix/lib/jvm/bin/java"
+  chmod +x "$prefix/lib/jvm/bin/java"
   cat > "$prefix/bin/python" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
@@ -2282,9 +2336,39 @@ def test_webshop_smoke_starts_pinned_local_checkout_and_verifies_artifacts(
     assert "--task-start-index 1 --task-end-index 2" in commands
     assert '"http_transition_count": 3' in completed.stdout
     assert '"quantile_backup_count": 1' in completed.stdout
+    java_home = (
+        Path(environment["WEBSHOP_ENV_PREFIX"]).resolve() / "lib" / "jvm"
+    )
+    assert (tmp_path / "server.env").read_text(
+        encoding="utf-8"
+    ).splitlines() == [
+        "JAVA_HOME={}".format(java_home),
+        "PATH={}:{}".format(java_home / "bin", environment["PATH"]),
+    ]
     server_pid = int(server_pid_log.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):
         os.kill(server_pid, 0)
+
+
+def test_webshop_smoke_fails_clearly_when_conda_java_is_missing(tmp_path):
+    environment, _, server_pid_log, _ = local_smoke_environment(tmp_path)
+    env_prefix = Path(environment["WEBSHOP_ENV_PREFIX"]).resolve()
+    java = env_prefix / "lib" / "jvm" / "bin" / "java"
+    java.unlink()
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert str(java) in completed.stderr
+    assert not server_pid_log.exists()
+    assert not (tmp_path / "server.env").exists()
 
 
 def test_webshop_smoke_rejects_git_subdirectory_root(tmp_path):

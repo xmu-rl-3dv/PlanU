@@ -117,6 +117,14 @@ server_reachable() {
     --connect-timeout 2 --max-time 5 "${HEALTH_URL}" >/dev/null
 }
 
+configure_java_runtime() {
+  JAVA_HOME="${WEBSHOP_ENV_PREFIX}/lib/jvm"
+  [[ -x "${JAVA_HOME}/bin/java" ]] ||
+    fail "Conda Java runtime is missing: ${JAVA_HOME}/bin/java"
+  export JAVA_HOME
+  export PATH="${JAVA_HOME}/bin:${PATH}"
+}
+
 verify_planu_source_clean() {
   local tracked_status
   local untracked_status
@@ -263,6 +271,7 @@ working_tree_status="$(
 
 [[ -x "${WEBSHOP_PYTHON}" ]] ||
   fail "pinned WebShop Python is missing; run scripts/bootstrap_webshop.sh"
+configure_java_runtime
 server_reachable &&
   fail "port 3000 is already serving a process not started by this smoke run"
 
