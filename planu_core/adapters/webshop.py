@@ -238,8 +238,6 @@ class WebShopAdapter:
             _freeze(runtime.buttons),
             _freeze(runtime.asins),
             _freeze(runtime.option_types),
-            runtime.step_count,
-            runtime.failure_count,
             runtime.terminated,
             runtime.truncated,
         )
@@ -437,6 +435,11 @@ class WebShopAdapter:
             )
 
         self._apply_page(state, page)
+        if target == "option":
+            state.observation = "You have clicked {}.\n{}".format(
+                resolved.argument,
+                state.observation,
+            )
         return self._result(state, float(page.reward))
 
     def _fetch_search(self, runtime: WebShopRuntime) -> WebShopPage:

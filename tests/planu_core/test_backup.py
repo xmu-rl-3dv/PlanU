@@ -1,18 +1,11 @@
 import numpy as np
 import pytest
 
-from planu_core.adapters.webshop import WebShopAdapter
 from planu_core.backup import backup_trajectory, suffix_returns
 from planu_core.config import PlanUConfig
 from planu_core.distribution import QuantileDistribution
 from planu_core.interfaces import ActionCandidate
 from planu_core.nodes import ActionNode, LanguageNode
-from planu_core.search import PlanUSearch
-from tests.planu_core.fakes import UniformScorer
-from tests.planu_core.webshop_fakes import (
-    DeterministicWebShopActionProvider,
-    FakeWebShopClient,
-)
 
 
 def test_backup_functions_are_exported_from_package():
@@ -199,34 +192,6 @@ def test_backup_updates_repeated_action_for_each_occurrence():
     assert returns == [1.5, 1.0]
     assert action.visit_count == 2
     assert action.cumulative_returns == [1.5, 1.0]
-
-
-def test_webshop_backup_persists_success_and_latency_failure_outcomes():
-    search = PlanUSearch(
-        WebShopAdapter(FakeWebShopClient(), "session-outcomes"),
-        UniformScorer(),
-        PlanUConfig(max_depth=2),
-        action_provider=DeterministicWebShopActionProvider(),
-    )
-
-    success = search.run_iteration(0, np.random.default_rng(0))
-    failure = search.run_iteration(1, np.random.default_rng(3))
-
-    search_state = success.state_path[1]
-    assert list(search_state.children) == [("click", "A-1")]
-    action = search_state.children[("click", "A-1")]
-    outcome_keys = set(action.children)
-    success_key = success.state_path[-1].state_key
-    failure_key = failure.state_path[-1].state_key
-
-    assert len(outcome_keys) >= 2
-    assert success_key != failure_key
-    assert {success_key, failure_key} <= outcome_keys
-    assert {success_key[12], failure_key[12]} == {0, 1}
-    assert success.action_path[-1] is action
-    assert failure.action_path[-1] is action
-    assert action.visit_count == 2
-    assert action.cumulative_returns == [0.0, 0.0]
 
 
 def test_empty_suffix_and_backup_return_empty_lists():

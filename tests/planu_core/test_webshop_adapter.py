@@ -10,7 +10,9 @@ from planu_core.adapters.webshop import (
     WebShopRuntime,
     webshop_config,
 )
+from planu_core.config import PlanUConfig
 from planu_core.interfaces import ActionCandidate, EnvironmentState
+from planu_core.search import PlanUSearch
 from planu_core.webshop import (
     WebShopAdapter as WebShopPackageAdapter,
     WebShopRuntime as WebShopPackageRuntime,
@@ -18,6 +20,7 @@ from planu_core.webshop import (
     webshop_config as webshop_package_config,
 )
 from planu_core.webshop.client import WebShopPage
+from tests.planu_core.fakes import UniformScorer
 
 
 INIT_PAGE = WebShopPage(
@@ -83,6 +86,17 @@ class FakeClient:
         raise AssertionError("unexpected page type: {}".format(page_type))
 
 
+class RecordingWebShopAdapter(WebShopAdapter):
+    def __init__(self, client, session_id):
+        super().__init__(client, session_id)
+        self.step_results = []
+
+    def step(self, state, action, rng):
+        result = super().step(state, action, rng)
+        self.step_results.append(result)
+        return result
+
+
 class RecordingRng:
     def __init__(self, latency):
         self.latency = latency
@@ -105,6 +119,16 @@ def candidate(kind, argument):
         payload=action,
         text=action.render(),
     )
+
+
+class DeterministicWebShopActionProvider:
+    def actions(self, state, state_visit_count=0):
+        del state_visit_count
+        if state.runtime.page_type == "init":
+            return [candidate("search", "red mug")]
+        if state.runtime.page_type == "search":
+            return [candidate("click", "A-1")]
+        return []
 
 
 def make_state(
@@ -208,7 +232,7 @@ def test_clone_deeply_isolates_observation_and_runtime():
     assert state.runtime.options == {"color": "Red"}
 
 
-def test_state_key_covers_observation_and_every_runtime_field():
+def test_state_key_covers_observation_and_transition_relevant_runtime_fields():
     adapter = WebShopAdapter(FakeClient(), "session-7")
     state = make_state()
     original_key = adapter.state_key(state)
@@ -228,8 +252,6 @@ def test_state_key_covers_observation_and_every_runtime_field():
         "buttons": ("< Prev",),
         "asins": ("A-3",),
         "option_types": (("Large", "Size"),),
-        "step_count": 4,
-        "failure_count": 2,
         "terminated": True,
         "truncated": True,
     }
@@ -237,6 +259,19 @@ def test_state_key_covers_observation_and_every_runtime_field():
         changed = adapter.clone(state)
         setattr(changed.runtime, field_name, changed_value)
         assert adapter.state_key(changed) != original_key, field_name
+
+
+@pytest.mark.parametrize(
+    ("field_name", "changed_value"),
+    [("step_count", 4), ("failure_count", 2)],
+)
+def test_state_key_ignores_telemetry_counters(field_name, changed_value):
+    adapter = WebShopAdapter(FakeClient(), "session-7")
+    state = make_state()
+    changed = adapter.clone(state)
+    setattr(changed.runtime, field_name, changed_value)
+
+    assert adapter.state_key(changed) == adapter.state_key(state)
 
 
 @pytest.mark.parametrize(
@@ -472,6 +507,9 @@ def test_item_option_click_updates_its_option_type_and_refetches_item():
     )
 
     assert result.state.runtime.options == {"color": "Blue"}
+    assert result.state.observation == (
+        "You have clicked Blue.\n" + ITEM_PAGE.observation
+    )
     assert state.runtime.options == {}
     assert client.calls[-1] == (
         "item",
@@ -657,6 +695,7 @@ def test_latency_failure_preserves_page_snapshot_and_increments_only_failures():
     assert rng.calls == [(0, 10)]
     assert client.calls == []
     assert state == snapshot
+    assert adapter.state_key(result.state) == adapter.state_key(state)
 
 
 def test_equal_latency_threshold_succeeds_and_uses_exact_distribution():
@@ -703,6 +742,68 @@ def test_seeded_latency_outcomes_are_reproducible():
     )
 
     assert first == second
+
+
+def test_search_depth_exhaustion_is_truncated_not_terminated():
+    search = PlanUSearch(
+        WebShopAdapter(FakeClient(), "session-depth"),
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+        action_provider=DeterministicWebShopActionProvider(),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(5))
+
+    assert result.actions == [("search", "red mug")]
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "max_depth"
+    assert result.state_path[-1].terminated is False
+    assert result.state_path[-1].truncated is True
+
+
+def test_search_groups_success_and_latency_failure_under_one_action():
+    adapter = RecordingWebShopAdapter(
+        FakeClient(),
+        "session-outcomes",
+    )
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(max_depth=2),
+        action_provider=DeterministicWebShopActionProvider(),
+    )
+
+    success = search.run_iteration(0, np.random.default_rng(0))
+    failure = search.run_iteration(1, np.random.default_rng(3))
+
+    search_state = success.state_path[1]
+    assert list(search_state.children) == [("click", "A-1")]
+    action = search_state.children[("click", "A-1")]
+    success_key = success.state_path[-1].state_key
+    failure_key = failure.state_path[-1].state_key
+
+    assert failure_key == search_state.state_key
+    assert success_key != search_state.state_key
+    assert set(action.children) == {success_key, failure_key}
+    assert success.action_path[-1] is action
+    assert failure.action_path[-1] is action
+    assert action.visit_count == 2
+    assert action.cumulative_returns == [0.0, 0.0]
+
+    stochastic_results = [
+        result
+        for result in adapter.step_results
+        if "latency_failure" in result.info
+    ]
+    assert len(stochastic_results) == 2
+    success_result, failure_result = stochastic_results
+    assert success_result.info["latency_failure"] is False
+    assert success_result.state.runtime.step_count == 2
+    assert success_result.state.runtime.failure_count == 0
+    assert failure_result.info["latency_failure"] is True
+    assert failure_result.state.runtime.step_count == 1
+    assert failure_result.state.runtime.failure_count == 1
 
 
 def test_webshop_config_matches_the_experiment_settings_exactly():
