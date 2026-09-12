@@ -55,6 +55,7 @@ def test_blockworld_state_pickle_loads_in_a_fresh_process(tmp_path):
         ],
         check=True,
         env=environment,
+        timeout=30,
     )
 
     completed = subprocess.run(
@@ -80,6 +81,7 @@ def test_blockworld_state_pickle_loads_in_a_fresh_process(tmp_path):
         capture_output=True,
         env=environment,
         text=True,
+        timeout=30,
     )
 
     assert completed.returncode == 0, completed.stderr

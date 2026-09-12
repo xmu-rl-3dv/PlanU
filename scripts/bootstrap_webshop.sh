@@ -4,7 +4,9 @@ set -euo pipefail
 SOURCE_URL="https://github.com/princeton-nlp/WebShop.git"
 COMMIT="64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
 START_ATTEMPTS="${WEBSHOP_BOOTSTRAP_START_ATTEMPTS:-120}"
+STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
+SERVER_PGID=""
 
 fail() {
   printf 'WebShop bootstrap error: %s\n' "$*" >&2
@@ -39,14 +41,44 @@ is_official_remote() {
   esac
 }
 
-cleanup() {
-  if [[ -n "${SERVER_PID}" ]]; then
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      kill "${SERVER_PID}" 2>/dev/null || true
-    fi
-    wait "${SERVER_PID}" 2>/dev/null || true
-  fi
+server_group_alive() {
+  [[ -n "${SERVER_PGID}" ]] &&
+    kill -0 -- "-${SERVER_PGID}" 2>/dev/null
+}
+
+reap_server() {
+  [[ -n "${SERVER_PID}" ]] || return
+  wait "${SERVER_PID}" 2>/dev/null || true
   SERVER_PID=""
+  SERVER_PGID=""
+}
+
+cleanup() {
+  local attempt=0
+  [[ -n "${SERVER_PID}" ]] || return 0
+
+  if server_group_alive; then
+    kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || true
+    while kill -0 "${SERVER_PID}" 2>/dev/null &&
+      ((attempt < STOP_ATTEMPTS)); do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if server_group_alive; then
+      kill -KILL -- "-${SERVER_PGID}" 2>/dev/null || true
+    fi
+  elif kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    while kill -0 "${SERVER_PID}" 2>/dev/null &&
+      ((attempt < STOP_ATTEMPTS)); do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill -KILL "${SERVER_PID}" 2>/dev/null || true
+    fi
+  fi
+  reap_server
 }
 
 verify_clean_checkout() {
@@ -114,17 +146,22 @@ verify_server_startup() {
   if server_reachable; then
     fail "port 3000 is already serving a process not started by this bootstrap"
   fi
-  (
-    cd "${ROOT}"
-    exec "${ENV_PREFIX}/bin/python" -m web_agent_site.app
-  ) >"${log_path}" 2>&1 &
+  python3 - "${ROOT}" "${ENV_PREFIX}/bin/python" \
+    >"${log_path}" 2>&1 <<'PY' &
+import os
+import sys
+
+os.chdir(sys.argv[1])
+os.setsid()
+os.execv(sys.argv[2], [sys.argv[2], "-m", "web_agent_site.app"])
+PY
   SERVER_PID=$!
+  SERVER_PGID="${SERVER_PID}"
 
   until server_reachable; do
     attempt=$((attempt + 1))
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      wait "${SERVER_PID}" 2>/dev/null || true
-      SERVER_PID=""
+      reap_server
       fail "pinned WebShop server exited during validation; see ${log_path}"
     fi
     if ((attempt >= START_ATTEMPTS)); then
@@ -154,6 +191,11 @@ case "${START_ATTEMPTS}" in
 esac
 ((START_ATTEMPTS > 0)) ||
   fail "WEBSHOP_BOOTSTRAP_START_ATTEMPTS must be a positive integer"
+case "${STOP_ATTEMPTS}" in
+  "" | *[!0-9]*) fail "WEBSHOP_STOP_ATTEMPTS must be a positive integer" ;;
+esac
+((STOP_ATTEMPTS > 0)) ||
+  fail "WEBSHOP_STOP_ATTEMPTS must be a positive integer"
 [[ "${ENV_PREFIX}" != "${ROOT}" ]] ||
   fail "WEBSHOP_ENV_PREFIX must not equal WEBSHOP_ROOT"
 
@@ -169,6 +211,13 @@ if [[ ! -e "${ROOT}" ]]; then
 elif [[ "$(git -C "${ROOT}" rev-parse --is-inside-work-tree 2>/dev/null || true)" != "true" ]]; then
   fail "WEBSHOP_ROOT exists but is not a Git checkout: ${ROOT}"
 fi
+
+checkout_root="$(git -C "${ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "${checkout_root}" ]] ||
+  fail "could not resolve the WebShop checkout top-level"
+checkout_root="$(canonical_path "${checkout_root}")"
+[[ "${ROOT}" == "${checkout_root}" ]] ||
+  fail "WEBSHOP_ROOT must equal the Git checkout top-level: ${checkout_root}"
 
 remote_url="$(git -C "${ROOT}" remote get-url origin 2>/dev/null || true)"
 is_official_remote "${remote_url}" ||
@@ -211,6 +260,7 @@ verify_environment ||
 if [[ -f "${SETUP_MARKER}" ]]; then
   verify_small_setup ||
     fail "setup marker exists but required data or Lucene index artifacts are incomplete"
+  verify_server_startup
 elif verify_small_setup; then
   verify_server_startup
   touch "${SETUP_MARKER}"

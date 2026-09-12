@@ -147,6 +147,7 @@ assert "fairscale" not in sys.modules
             ],
             capture_output=True,
             text=True,
+            timeout=30,
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -172,6 +173,7 @@ assert "fairscale" not in sys.modules
                     check=True,
                     capture_output=True,
                     text=True,
+                    timeout=120,
                 )
 
             source_archive = next(distribution_directory.glob("*.tar.gz"))
@@ -254,6 +256,7 @@ assert "fairscale" not in sys.modules
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=120,
             )
             import_check = subprocess.run(
                 [
@@ -286,6 +289,7 @@ assert callable(reasoners.visualization.main)
                 cwd=temporary_path,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
             if import_check.returncode:
                 missing_module = None

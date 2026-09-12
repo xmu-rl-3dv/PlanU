@@ -95,6 +95,7 @@ assert os.environ["CUDA_VISIBLE_DEVICES"] == expected_gpu
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr

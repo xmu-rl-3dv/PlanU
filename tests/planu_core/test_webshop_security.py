@@ -23,6 +23,7 @@ def test_tracked_webshop_files_contain_no_credential_literals() -> None:
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
+        timeout=30,
     )
     tracked_paths = [
         path.decode("utf-8") for path in result.stdout.split(b"\0") if path

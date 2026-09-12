@@ -1670,6 +1670,7 @@ def test_existing_direct_script_command_can_parse_without_gym():
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert completed.returncode == 0, completed.stderr

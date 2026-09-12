@@ -108,6 +108,7 @@ assert PlanU.__name__ == "PlanU"
         },
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr

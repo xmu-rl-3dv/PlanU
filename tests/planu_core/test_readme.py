@@ -351,6 +351,7 @@ def test_overcooked_script_is_valid_strict_bash_with_configurable_defaults():
         ["bash", "-n", str(OVERCOOKED_SCRIPT)],
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert syntax_check.returncode == 0, syntax_check.stderr

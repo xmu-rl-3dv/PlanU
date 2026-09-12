@@ -9,7 +9,9 @@ DEFAULT_HEALTH_URL="http://127.0.0.1:3000/fixed_1"
 HEALTH_URL="${WEBSHOP_URL}/fixed_1"
 SMOKE_QUERY="${WEBSHOP_SMOKE_QUERY:-product}"
 START_ATTEMPTS="${WEBSHOP_START_ATTEMPTS:-120}"
+STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
+SERVER_PGID=""
 SERVER_COMMIT=""
 
 fail() {
@@ -70,19 +72,118 @@ is_official_remote() {
   esac
 }
 
-cleanup() {
-  if [[ -n "${SERVER_PID}" ]]; then
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      kill "${SERVER_PID}" 2>/dev/null || true
-    fi
-    wait "${SERVER_PID}" 2>/dev/null || true
-  fi
+server_group_alive() {
+  [[ -n "${SERVER_PGID}" ]] &&
+    kill -0 -- "-${SERVER_PGID}" 2>/dev/null
+}
+
+reap_server() {
+  [[ -n "${SERVER_PID}" ]] || return
+  wait "${SERVER_PID}" 2>/dev/null || true
   SERVER_PID=""
+  SERVER_PGID=""
+}
+
+cleanup() {
+  local attempt=0
+  [[ -n "${SERVER_PID}" ]] || return 0
+
+  if server_group_alive; then
+    kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || true
+    while kill -0 "${SERVER_PID}" 2>/dev/null &&
+      ((attempt < STOP_ATTEMPTS)); do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if server_group_alive; then
+      kill -KILL -- "-${SERVER_PGID}" 2>/dev/null || true
+    fi
+  elif kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    while kill -0 "${SERVER_PID}" 2>/dev/null &&
+      ((attempt < STOP_ATTEMPTS)); do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill -KILL "${SERVER_PID}" 2>/dev/null || true
+    fi
+  fi
+  reap_server
 }
 
 server_reachable() {
   curl --fail --silent \
     --connect-timeout 2 --max-time 5 "${HEALTH_URL}" >/dev/null
+}
+
+verify_planu_source_clean() {
+  local tracked_status
+  local untracked_status
+  local untracked_path
+  local -a pathspecs
+
+  pathspecs=(
+    planu_core
+    webshop
+    scripts
+    setup.py
+    pyproject.toml
+    setup.cfg
+    pytest.ini
+    tox.ini
+    requirements.txt
+    requirements-dev.txt
+    requirements-experiments.txt
+    requirements-experiments-lock.txt
+    ":(top,glob)*.toml"
+    ":(top,glob)*.cfg"
+    ":(top,glob)*.ini"
+    ":(top,glob)*.yaml"
+    ":(top,glob)*.yml"
+    ":(top,glob)requirements*.txt"
+    ":(exclude,glob)**/__pycache__/**"
+    ":(exclude,glob)**/.pytest_cache/**"
+    ":(exclude,glob)**/.mypy_cache/**"
+    ":(exclude,glob)**/.ruff_cache/**"
+    ":(exclude,glob)**/output/**"
+    ":(exclude,glob)**/outputs/**"
+    ":(exclude,glob)**/results/**"
+    ":(exclude,glob)**/runs/**"
+    ":(exclude,glob)**/logs/**"
+  )
+  tracked_status="$(
+    git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=no \
+      -- "${pathspecs[@]}"
+  )" || fail "could not inspect tracked PlanU source files"
+  [[ -z "${tracked_status}" ]] ||
+    fail "PlanU source checkout must be clean before an authoritative smoke run"
+
+  untracked_status="$(
+    git -C "${PROJECT_ROOT}" ls-files --others --exclude-standard \
+      -- "${pathspecs[@]}"
+  )" || fail "could not inspect untracked PlanU source files"
+  while IFS= read -r untracked_path; do
+    [[ -n "${untracked_path}" ]] || continue
+    case "${untracked_path}" in
+      */__pycache__/* | */.pytest_cache/* | */.mypy_cache/* | \
+        */.ruff_cache/* | */output/* | */outputs/* | */results/* | \
+        */runs/* | */logs/*)
+        continue
+        ;;
+      planu_core/*.py | planu_core/*.pyi | \
+        planu_core/*.sh | planu_core/*.toml | planu_core/*.cfg | \
+        planu_core/*.ini | planu_core/*.yaml | planu_core/*.yml | \
+        webshop/*.py | webshop/*.pyi | webshop/*.sh | webshop/*.toml | \
+        webshop/*.cfg | webshop/*.ini | webshop/*.yaml | webshop/*.yml | \
+        scripts/*.py | scripts/*.pyi | scripts/*.sh | scripts/*.toml | \
+        scripts/*.cfg | scripts/*.ini | scripts/*.yaml | scripts/*.yml | \
+        setup.py | *.toml | *.cfg | *.ini | *.yaml | *.yml | \
+        requirements*.txt)
+        fail "PlanU source checkout must be clean before an authoritative smoke run"
+        ;;
+    esac
+  done <<<"${untracked_status}"
 }
 
 trap cleanup EXIT
@@ -108,76 +209,92 @@ WEBSHOP_ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX}")"
 WEBSHOP_PYTHON="$(absolute_path "${WEBSHOP_PYTHON:-${WEBSHOP_ENV_PREFIX}/bin/python}")"
 PLANU_PYTHON="$(canonical_command "${PLANU_PYTHON:-python3}")"
 RUN_ROOT="$(canonical_path "${RUN_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/planu-webshop-smoke.XXXXXX")}")"
-PLANU_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)"
-[[ -n "${PLANU_COMMIT}" ]] ||
-  fail "could not resolve the current PlanU checkout commit"
 
 case "${START_ATTEMPTS}" in
   "" | *[!0-9]*) fail "WEBSHOP_START_ATTEMPTS must be a positive integer" ;;
 esac
 ((START_ATTEMPTS > 0)) ||
   fail "WEBSHOP_START_ATTEMPTS must be a positive integer"
+case "${STOP_ATTEMPTS}" in
+  "" | *[!0-9]*) fail "WEBSHOP_STOP_ATTEMPTS must be a positive integer" ;;
+esac
+((STOP_ATTEMPTS > 0)) ||
+  fail "WEBSHOP_STOP_ATTEMPTS must be a positive integer"
+
+[[ "${HEALTH_URL}" == "${DEFAULT_HEALTH_URL}" ]] ||
+  fail "authoritative WebShop smoke is local-only; external URLs are non-authoritative"
+
+verify_planu_source_clean
+PLANU_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+[[ -n "${PLANU_COMMIT}" ]] ||
+  fail "could not resolve the current clean PlanU checkout commit"
 
 mkdir -p "${RUN_ROOT}"
 
-if server_reachable; then
-  SERVER_COMMIT="${WEBSHOP_SERVER_COMMIT:-}"
-  [[ -n "${SERVER_COMMIT}" ]] ||
-    fail "WEBSHOP_SERVER_COMMIT is required for a reachable external WebShop server"
-  [[ "${SERVER_COMMIT}" == "${COMMIT}" ]] ||
-    fail "WEBSHOP_SERVER_COMMIT must equal pinned commit ${COMMIT}"
-else
-  [[ "${HEALTH_URL}" == "${DEFAULT_HEALTH_URL}" ]] ||
-    fail "configured WEBSHOP_URL is not reachable: ${HEALTH_URL}"
+[[ "$(git -C "${WEBSHOP_ROOT}" rev-parse --is-inside-work-tree 2>/dev/null || true)" == "true" ]] ||
+  fail "WEBSHOP_ROOT is not a bootstrapped Git working tree: ${WEBSHOP_ROOT}"
+checkout_root="$(git -C "${WEBSHOP_ROOT}" rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "${checkout_root}" ]] ||
+  fail "could not resolve the WebShop checkout top-level"
+checkout_root="$(canonical_path "${checkout_root}")"
+[[ "${WEBSHOP_ROOT}" == "${checkout_root}" ]] ||
+  fail "WEBSHOP_ROOT must equal the Git checkout top-level: ${checkout_root}"
 
-  [[ "$(git -C "${WEBSHOP_ROOT}" rev-parse --is-inside-work-tree 2>/dev/null || true)" == "true" ]] ||
-    fail "WEBSHOP_ROOT is not a bootstrapped Git working tree: ${WEBSHOP_ROOT}"
+remote_url="$(git -C "${WEBSHOP_ROOT}" remote get-url origin 2>/dev/null || true)"
+is_official_remote "${remote_url}" ||
+  fail "origin remote must match ${SOURCE_URL}; found ${remote_url:-missing}"
 
-  remote_url="$(git -C "${WEBSHOP_ROOT}" remote get-url origin 2>/dev/null || true)"
-  is_official_remote "${remote_url}" ||
-    fail "origin remote must match ${SOURCE_URL}; found ${remote_url:-missing}"
+actual_commit="$(git -C "${WEBSHOP_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+[[ "${actual_commit}" == "${COMMIT}" ]] ||
+  fail "WEBSHOP_ROOT must be pinned at ${COMMIT}; found ${actual_commit:-unknown}"
+SERVER_COMMIT="${actual_commit}"
 
-  actual_commit="$(git -C "${WEBSHOP_ROOT}" rev-parse HEAD 2>/dev/null || true)"
-  [[ "${actual_commit}" == "${COMMIT}" ]] ||
-    fail "WEBSHOP_ROOT must be pinned at ${COMMIT}; found ${actual_commit:-unknown}"
-  SERVER_COMMIT="${actual_commit}"
-
-  pathspecs=(.)
-  if [[ "${WEBSHOP_ENV_PREFIX}" == "${WEBSHOP_ROOT}/"* ]]; then
-    env_relative="${WEBSHOP_ENV_PREFIX#"${WEBSHOP_ROOT}/"}"
-    pathspecs+=(":(exclude)${env_relative}")
-  fi
-  working_tree_status="$(
-    git -C "${WEBSHOP_ROOT}" status --porcelain --untracked-files=normal \
-      -- "${pathspecs[@]}"
-  )" || fail "could not inspect the WebShop working tree"
-  [[ -z "${working_tree_status}" ]] ||
-    fail "WEBSHOP_ROOT must be clean before a real smoke run"
-
-  [[ -x "${WEBSHOP_PYTHON}" ]] ||
-    fail "pinned WebShop Python is missing; run scripts/bootstrap_webshop.sh"
-
-  (
-    cd "${WEBSHOP_ROOT}"
-    exec "${WEBSHOP_PYTHON}" -m web_agent_site.app --log --attrs
-  ) >"${RUN_ROOT}/webshop-server.log" 2>&1 &
-  SERVER_PID=$!
-
-  attempt=0
-  until server_reachable; do
-    attempt=$((attempt + 1))
-    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      wait "${SERVER_PID}" 2>/dev/null || true
-      fail "official WebShop server exited during startup; see ${RUN_ROOT}/webshop-server.log"
-    fi
-    if ((attempt >= START_ATTEMPTS)); then
-      fail "official WebShop server did not become ready after ${START_ATTEMPTS} attempts"
-    fi
-    sleep 1
-  done
-  kill -0 "${SERVER_PID}" 2>/dev/null ||
-    fail "official WebShop server exited after its health check"
+pathspecs=(.)
+if [[ "${WEBSHOP_ENV_PREFIX}" == "${WEBSHOP_ROOT}/"* ]]; then
+  env_relative="${WEBSHOP_ENV_PREFIX#"${WEBSHOP_ROOT}/"}"
+  pathspecs+=(":(exclude)${env_relative}")
 fi
+working_tree_status="$(
+  git -C "${WEBSHOP_ROOT}" status --porcelain --untracked-files=normal \
+    -- "${pathspecs[@]}"
+)" || fail "could not inspect the WebShop working tree"
+[[ -z "${working_tree_status}" ]] ||
+  fail "WEBSHOP_ROOT must be clean before a real smoke run"
+
+[[ -x "${WEBSHOP_PYTHON}" ]] ||
+  fail "pinned WebShop Python is missing; run scripts/bootstrap_webshop.sh"
+server_reachable &&
+  fail "port 3000 is already serving a process not started by this smoke run"
+
+python3 - "${WEBSHOP_ROOT}" "${WEBSHOP_PYTHON}" \
+  >"${RUN_ROOT}/webshop-server.log" 2>&1 <<'PY' &
+import os
+import sys
+
+os.chdir(sys.argv[1])
+os.setsid()
+os.execv(
+    sys.argv[2],
+    [sys.argv[2], "-m", "web_agent_site.app", "--log", "--attrs"],
+)
+PY
+SERVER_PID=$!
+SERVER_PGID="${SERVER_PID}"
+
+attempt=0
+until server_reachable; do
+  attempt=$((attempt + 1))
+  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    reap_server
+    fail "official WebShop server exited during startup; see ${RUN_ROOT}/webshop-server.log"
+  fi
+  if ((attempt >= START_ATTEMPTS)); then
+    fail "official WebShop server did not become ready after ${START_ATTEMPTS} attempts"
+  fi
+  sleep 1
+done
+kill -0 "${SERVER_PID}" 2>/dev/null ||
+  fail "official WebShop server exited after its health check"
 
 cd "${PROJECT_ROOT}"
 "${PLANU_PYTHON}" -m planu_core.webshop.runner \

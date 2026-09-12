@@ -25,6 +25,7 @@ from planu_core.webshop.runner import (
 ROOT = Path(__file__).resolve().parents[2]
 WEBSHOP_SCRIPT = ROOT / "scripts" / "smoke_webshop.sh"
 WEBSHOP_BOOTSTRAP = ROOT / "scripts" / "bootstrap_webshop.sh"
+SCRIPT_TIMEOUT = 20
 
 
 def write_executable(path, source):
@@ -259,6 +260,97 @@ for name, payload in (
 PY
 """,
     )
+
+
+def local_smoke_environment(tmp_path, *, artifact_mode="valid", resistant=False):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    env_prefix = webshop_root / "custom-env"
+    (env_prefix / "bin").mkdir(parents=True)
+    server_pid_log = tmp_path / "server.pid"
+    child_pid_log = tmp_path / "child.pid"
+    server_source = r"""
+printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+if [[ "${FAKE_RESIST_TERM:-0}" == "1" ]]; then
+  trap '' TERM INT
+  bash -c '
+    trap "" TERM INT
+    printf "%s\n" "$$" > "$FAKE_CHILD_PID_LOG"
+    while true; do sleep 1; done
+  ' &
+else
+  trap 'exit 0' TERM INT
+fi
+while true; do sleep 1; done
+"""
+    write_executable(env_prefix / "bin" / "python", server_source)
+    command_log = tmp_path / "commands.log"
+    write_executable(
+        fake_bin / "git",
+        r"""
+printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"
+case "$*" in
+  *"$FAKE_WEBSHOP_ROOT rev-parse --show-toplevel"*)
+    printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL"
+    ;;
+  *"$FAKE_PROJECT_ROOT rev-parse HEAD"*)
+    printf '%s\n' "$FAKE_PLANU_HEAD"
+    ;;
+  *"$FAKE_PROJECT_ROOT status --porcelain --untracked-files=no"*)
+    printf '%s' "${FAKE_PLANU_TRACKED_STATUS:-}"
+    ;;
+  *"$FAKE_PROJECT_ROOT ls-files --others"*)
+    printf '%s' "${FAKE_PLANU_UNTRACKED_FILES:-}"
+    ;;
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"status --porcelain"*) ;;
+esac
+""",
+    )
+    write_executable(
+        fake_bin / "curl",
+        r"""
+printf 'curl %s\n' "$*" >> "$FAKE_COMMAND_LOG"
+[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
+server_pid="$(cat "$FAKE_SERVER_PID_LOG")"
+kill -0 "$server_pid" 2>/dev/null
+""",
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+        timeout=SCRIPT_TIMEOUT,
+    ).strip()
+    environment = script_environment(
+        fake_bin,
+        FAKE_ARTIFACT_MODE=artifact_mode,
+        FAKE_CHILD_PID_LOG=str(child_pid_log),
+        FAKE_COMMAND_LOG=str(command_log),
+        FAKE_PLANU_HEAD=planu_head,
+        FAKE_PROJECT_ROOT=str(ROOT),
+        FAKE_REAL_PYTHON=sys.executable,
+        FAKE_RESIST_TERM="1" if resistant else "0",
+        FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_SERVER_URL="http://127.0.0.1:3000",
+        FAKE_WEBSHOP_ROOT=str(webshop_root),
+        FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
+        PLANU_PYTHON=str(fake_bin / "planu-python"),
+        RUN_ROOT=str(tmp_path / "run"),
+        WEBSHOP_ENV_PREFIX=str(env_prefix),
+        WEBSHOP_ROOT=str(webshop_root),
+        WEBSHOP_STOP_ATTEMPTS="2",
+    )
+    return environment, command_log, server_pid_log, child_pid_log
 
 
 class Closeable:
@@ -1603,6 +1695,8 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "python=3.8.13" in bootstrap
     assert "setup.sh -d small" in bootstrap
     assert "checkout --detach" in bootstrap
+    assert "rev-parse --show-toplevel" in bootstrap
+    assert "verify_server_startup" in bootstrap
     assert "reset --hard" not in bootstrap
     assert "clean -f" not in bootstrap
 
@@ -1613,7 +1707,10 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "WEBSHOP_ROOT" in smoke
     assert "WEBSHOP_URL" in smoke
     assert "http://127.0.0.1:3000/fixed_1" in smoke
-    assert "-m web_agent_site.app --log --attrs" in smoke
+    assert '"-m", "web_agent_site.app", "--log", "--attrs"' in smoke
+    assert "authoritative WebShop smoke is local-only" in smoke
+    assert "rev-parse --show-toplevel" in smoke
+    assert "status --porcelain --untracked-files=no" in smoke
     for argument in (
         "--smoke",
         "--task-start-index 1",
@@ -1627,7 +1724,8 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "pkill" not in smoke
     assert "killall" not in smoke
     assert "trap cleanup EXIT" in smoke
-    assert 'kill "${SERVER_PID}"' in smoke
+    assert 'kill -TERM -- "-${SERVER_PGID}"' in smoke
+    assert 'kill -KILL -- "-${SERVER_PGID}"' in smoke
 
     for script in (WEBSHOP_BOOTSTRAP, WEBSHOP_SCRIPT):
         syntax = subprocess.run(
@@ -1635,6 +1733,7 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
             check=False,
             capture_output=True,
             text=True,
+            timeout=SCRIPT_TIMEOUT,
         )
         assert syntax.returncode == 0, syntax.stderr
 
@@ -1659,6 +1758,7 @@ def test_webshop_bootstrap_checks_for_conda_before_clone(tmp_path):
             FAKE_GIT_LOG=str(git_log),
             WEBSHOP_ROOT=str(webshop_root),
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0
@@ -1690,6 +1790,7 @@ fi
             fake_bin,
             WEBSHOP_ROOT=str(tmp_path / "WebShop"),
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0
@@ -1713,6 +1814,7 @@ def test_webshop_bootstrap_rejects_wrong_existing_remote_without_mutation(
 printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
 case "$*" in
   *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
   *"remote get-url origin"*) printf 'https://example.com/not-webshop.git\n' ;;
 esac
 """,
@@ -1727,8 +1829,10 @@ esac
         env=script_environment(
             fake_bin,
             FAKE_GIT_LOG=str(git_log),
+            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
             WEBSHOP_ROOT=str(webshop_root),
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     commands = git_log.read_text(encoding="utf-8")
@@ -1737,6 +1841,46 @@ esac
     assert "checkout" not in commands
     assert "fetch" not in commands
     assert sentinel.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_webshop_bootstrap_rejects_git_subdirectory_before_mutation(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git_log = tmp_path / "git.log"
+    webshop_root = tmp_path / "WebShop"
+    nested_root = webshop_root / "web_agent_site"
+    nested_root.mkdir(parents=True)
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_GIT_LOG=str(git_log),
+            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
+            WEBSHOP_ROOT=str(nested_root),
+        ),
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    commands = git_log.read_text(encoding="utf-8")
+    assert completed.returncode != 0
+    assert "top-level" in completed.stderr
+    assert "fetch" not in commands
+    assert "checkout" not in commands
 
 
 def test_webshop_bootstrap_refuses_dirty_checkout_before_fetch(tmp_path):
@@ -1753,6 +1897,7 @@ def test_webshop_bootstrap_refuses_dirty_checkout_before_fetch(tmp_path):
 printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
 case "$*" in
   *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
   *"remote get-url origin"*)
     printf 'https://github.com/princeton-nlp/WebShop.git\n'
     ;;
@@ -1771,8 +1916,10 @@ esac
         env=script_environment(
             fake_bin,
             FAKE_GIT_LOG=str(git_log),
+            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
             WEBSHOP_ROOT=str(webshop_root),
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     commands = git_log.read_text(encoding="utf-8")
@@ -1828,6 +1975,7 @@ fi
         """
 case "$*" in
   *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
   *"remote get-url origin"*)
     printf 'https://github.com/princeton-nlp/WebShop.git\n'
     ;;
@@ -1849,8 +1997,10 @@ esac
         text=True,
         env=script_environment(
             fake_bin,
+            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
             WEBSHOP_ROOT=str(webshop_root),
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0
@@ -1877,11 +2027,18 @@ def test_webshop_bootstrap_canonicalizes_relative_root_and_custom_env(
         path.write_text("nonempty\n", encoding="utf-8")
     env_prefix = webshop_root / "custom-env"
     (env_prefix / "bin").mkdir(parents=True)
+    server_pid_log = tmp_path / "server.pid"
     write_executable(
         env_prefix / "bin" / "python",
         """
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *"import web_agent_site.app"* ]]; then
+  exit 0
+elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
+  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
 fi
 """,
     )
@@ -1896,6 +2053,7 @@ fi
 printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
 case "$*" in
   *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
   *"remote get-url origin"*)
     printf 'https://github.com/princeton-nlp/WebShop.git\n'
     ;;
@@ -1913,6 +2071,13 @@ esac
 """,
     )
     write_executable(fake_bin / "conda", "exit 0\n")
+    write_executable(
+        fake_bin / "curl",
+        """
+[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
+kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
+""",
+    )
 
     completed = subprocess.run(
         ["bash", str(WEBSHOP_BOOTSTRAP)],
@@ -1923,9 +2088,12 @@ esac
         env=script_environment(
             fake_bin,
             FAKE_GIT_LOG=str(git_log),
+            FAKE_SERVER_PID_LOG=str(server_pid_log),
+            FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
             WEBSHOP_ENV_PREFIX="WebShop/custom-env",
             WEBSHOP_ROOT="WebShop",
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -1959,6 +2127,7 @@ printf 'segment info\n' > search_engine/indexes/_0.si
         """
 case "$*" in
   *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
   *"remote get-url origin"*)
     printf 'https://github.com/princeton-nlp/WebShop.git\n'
     ;;
@@ -1991,7 +2160,7 @@ if [[ "$*" == *"platform.python_version"* ]]; then
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
   exit 0
 elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
-  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+  printf '%s\n' "$$" >> "$FAKE_SERVER_PID_LOG"
   trap 'exit 0' TERM INT
   while true; do
     sleep 1
@@ -2004,26 +2173,20 @@ elif [[ "${1:-}" == "run" ]]; then
 fi
 """,
     )
-    curl_count = tmp_path / "curl-count"
     write_executable(
         fake_bin / "curl",
         """
-count=0
-if [[ -f "$FAKE_CURL_COUNT" ]]; then
-  count="$(cat "$FAKE_CURL_COUNT")"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
-((count > 1))
+[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
+kill -0 "$(tail -n 1 "$FAKE_SERVER_PID_LOG")" 2>/dev/null
 """,
     )
     server_pid_log = tmp_path / "server.pid"
     environment = script_environment(
         fake_bin,
         FAKE_CONDA_LOG=str(conda_log),
-        FAKE_CURL_COUNT=str(curl_count),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SETUP_LOG=str(setup_log),
+        FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
         WEBSHOP_ROOT=str(webshop_root),
     )
 
@@ -2033,6 +2196,7 @@ printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
         capture_output=True,
         text=True,
         env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
     second = subprocess.run(
         ["bash", str(WEBSHOP_BOOTSTRAP)],
@@ -2040,6 +2204,7 @@ printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
         capture_output=True,
         text=True,
         env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert first.returncode == 0, first.stderr
@@ -2050,21 +2215,19 @@ printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
     assert setup_log.read_text(encoding="utf-8").splitlines() == [
         "setup -d small"
     ]
-    server_pid = int(server_pid_log.read_text(encoding="utf-8"))
+    server_pids = server_pid_log.read_text(encoding="utf-8").splitlines()
+    assert len(server_pids) == 2
+    server_pid = int(server_pids[-1])
     with pytest.raises(ProcessLookupError):
         os.kill(server_pid, 0)
 
 
-def test_webshop_smoke_uses_reachable_server_and_verifies_artifacts(tmp_path):
+def test_webshop_smoke_rejects_external_server_even_with_asserted_commit(
+    tmp_path,
+):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    run_root = tmp_path / "run"
     command_log = tmp_path / "commands.log"
-    planu_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        text=True,
-    ).strip()
     write_executable(
         fake_bin / "curl",
         'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
@@ -2081,241 +2244,156 @@ def test_webshop_smoke_uses_reachable_server_and_verifies_artifacts(tmp_path):
             fake_bin,
             FAKE_COMMAND_LOG=str(command_log),
             FAKE_REAL_PYTHON=sys.executable,
-            FAKE_PLANU_HEAD=planu_head,
-            FAKE_SERVER_URL="https://shop.example",
             PLANU_PYTHON="bin/planu-python",
             RUN_ROOT="run",
             WEBSHOP_ROOT="missing-webshop-checkout",
             WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
             WEBSHOP_URL="https://shop.example",
         ),
+        timeout=SCRIPT_TIMEOUT,
     )
 
-    commands = command_log.read_text(encoding="utf-8")
+    assert completed.returncode != 0
+    assert "authoritative" in completed.stderr.lower()
+    assert "local" in completed.stderr.lower()
+    assert not command_log.exists()
+
+
+def test_webshop_smoke_starts_pinned_local_checkout_and_verifies_artifacts(
+    tmp_path,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path
+    )
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
     assert completed.returncode == 0, completed.stderr
-    assert run_root.is_dir()
-    assert not (tmp_path / "missing-webshop-checkout").exists()
-    assert "https://shop.example/fixed_1" in commands
+    commands = command_log.read_text(encoding="utf-8")
     assert "--smoke" in commands
     assert "--iterations 1" in commands
     assert "--depth 10" in commands
     assert "--task-start-index 1 --task-end-index 2" in commands
     assert '"http_transition_count": 3' in completed.stdout
     assert '"quantile_backup_count": 1' in completed.stdout
-
-
-def test_webshop_smoke_starts_only_pinned_local_checkout_and_kills_own_pid(
-    tmp_path,
-):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    webshop_root = tmp_path / "WebShop"
-    (webshop_root / ".git").mkdir(parents=True)
-    env_prefix = webshop_root / "custom-env"
-    (env_prefix / "bin").mkdir(parents=True)
-    server_pid_log = tmp_path / "server.pid"
-    write_executable(
-        env_prefix / "bin" / "python",
-        """
-printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
-trap 'exit 0' TERM INT
-while true; do
-  sleep 1
-done
-""",
-    )
-    command_log = tmp_path / "commands.log"
-    curl_count = tmp_path / "curl-count"
-    planu_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        text=True,
-    ).strip()
-    write_executable(
-        fake_bin / "git",
-        """
-printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"
-case "$*" in
-  *"$FAKE_PROJECT_ROOT rev-parse HEAD"*) printf '%s\n' "$FAKE_PLANU_HEAD" ;;
-  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
-  *"remote get-url origin"*)
-    printf 'https://github.com/princeton-nlp/WebShop.git\n'
-    ;;
-  *"rev-parse HEAD"*)
-    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
-    ;;
-  *"status --porcelain"*)
-    if [[ "$*" != *":(exclude)custom-env"* ]]; then
-      printf '?? custom-env/\n'
-    fi
-    ;;
-esac
-""",
-    )
-    write_executable(
-        fake_bin / "curl",
-        """
-printf 'curl %s\n' "$*" >> "$FAKE_COMMAND_LOG"
-count=0
-if [[ -f "$FAKE_CURL_COUNT" ]]; then
-  count="$(cat "$FAKE_CURL_COUNT")"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
-((count > 1))
-""",
-    )
-    write_smoke_runner_fake(fake_bin / "planu-python")
-
-    completed = subprocess.run(
-        ["bash", str(WEBSHOP_SCRIPT)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_COMMAND_LOG=str(command_log),
-            FAKE_CURL_COUNT=str(curl_count),
-            FAKE_PLANU_HEAD=planu_head,
-            FAKE_PROJECT_ROOT=str(ROOT),
-            FAKE_REAL_PYTHON=sys.executable,
-            FAKE_SERVER_PID_LOG=str(server_pid_log),
-            FAKE_SERVER_URL="http://127.0.0.1:3000",
-            PLANU_PYTHON="bin/planu-python",
-            RUN_ROOT="run",
-            WEBSHOP_ENV_PREFIX="WebShop/custom-env",
-            WEBSHOP_ROOT="WebShop",
-        ),
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    commands = command_log.read_text(encoding="utf-8")
-    assert ":(exclude)custom-env" in commands
-    assert server_pid_log.is_file()
     server_pid = int(server_pid_log.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):
         os.kill(server_pid, 0)
 
 
-def test_webshop_smoke_requires_external_server_commit_provenance(tmp_path):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    command_log = tmp_path / "commands.log"
-    planu_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        text=True,
-    ).strip()
-    write_executable(
-        fake_bin / "curl",
-        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+def test_webshop_smoke_rejects_git_subdirectory_root(tmp_path):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path
     )
-    write_smoke_runner_fake(fake_bin / "planu-python")
+    webshop_root = Path(environment["FAKE_WEBSHOP_ROOT"])
+    nested_root = webshop_root / "web_agent_site"
+    nested_root.mkdir()
+    environment["FAKE_WEBSHOP_ROOT"] = str(nested_root)
+    environment["WEBSHOP_ROOT"] = str(nested_root)
 
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
-        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_COMMAND_LOG=str(command_log),
-            FAKE_REAL_PYTHON=sys.executable,
-            FAKE_PLANU_HEAD=planu_head,
-            FAKE_SERVER_URL="https://shop.example",
-            PLANU_PYTHON="bin/planu-python",
-            RUN_ROOT="run",
-            WEBSHOP_ROOT="missing-webshop-checkout",
-            WEBSHOP_URL="https://shop.example",
-        ),
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0
-    assert "WEBSHOP_SERVER_COMMIT" in completed.stderr
+    assert "top-level" in completed.stderr
+    assert not server_pid_log.exists()
     assert "python -m planu_core.webshop.runner" not in (
         command_log.read_text(encoding="utf-8")
     )
 
 
-def test_webshop_smoke_rejects_wrong_external_server_commit(tmp_path):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    command_log = tmp_path / "commands.log"
-    write_executable(
-        fake_bin / "curl",
-        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+@pytest.mark.parametrize(
+    ("tracked_status", "untracked_files"),
+    [
+        (" M planu_core/search.py\n", ""),
+        ("", "scripts/local_smoke_override.py\n"),
+        (" M requirements.txt\n", ""),
+    ],
+)
+def test_webshop_smoke_rejects_dirty_relevant_planu_source(
+    tmp_path,
+    tracked_status,
+    untracked_files,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path
     )
-    write_smoke_runner_fake(fake_bin / "planu-python")
-
+    environment["FAKE_PLANU_TRACKED_STATUS"] = tracked_status
+    environment["FAKE_PLANU_UNTRACKED_FILES"] = untracked_files
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
-        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_COMMAND_LOG=str(command_log),
-            FAKE_REAL_PYTHON=sys.executable,
-            PLANU_PYTHON="bin/planu-python",
-            RUN_ROOT="run",
-            WEBSHOP_SERVER_COMMIT="wrong",
-            WEBSHOP_URL="https://shop.example",
-        ),
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0
-    assert "must equal pinned commit" in completed.stderr
+    assert "PlanU source checkout must be clean" in completed.stderr
+    assert not server_pid_log.exists()
     assert "python -m planu_core.webshop.runner" not in (
         command_log.read_text(encoding="utf-8")
     )
 
 
-def test_webshop_smoke_rejects_fabricated_minimal_artifacts(tmp_path):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    command_log = tmp_path / "commands.log"
-    planu_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        text=True,
-    ).strip()
-    write_executable(
-        fake_bin / "curl",
-        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+def test_webshop_smoke_allows_external_caches_and_output_files(tmp_path):
+    environment, _, _, _ = local_smoke_environment(tmp_path)
+    environment["FAKE_PLANU_UNTRACKED_FILES"] = (
+        "external/WebShop/local.py\n"
+        "planu_core/__pycache__/generated.py\n"
+        "planu_core/outputs/result.py\n"
     )
-    write_smoke_runner_fake(fake_bin / "planu-python")
 
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
-        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_ARTIFACT_MODE="minimal",
-            FAKE_COMMAND_LOG=str(command_log),
-            FAKE_REAL_PYTHON=sys.executable,
-            FAKE_PLANU_HEAD=planu_head,
-            FAKE_SERVER_URL="https://shop.example",
-            PLANU_PYTHON="bin/planu-python",
-            RUN_ROOT="run",
-            WEBSHOP_ROOT="missing-webshop-checkout",
-            WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
-            WEBSHOP_URL="https://shop.example",
-        ),
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
 
-    assert completed.returncode != 0
-    assert "keys mismatch" in completed.stderr
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_webshop_smoke_kills_term_resistant_process_group(tmp_path):
+    environment, _, server_pid_log, child_pid_log = local_smoke_environment(
+        tmp_path,
+        resistant=True,
+    )
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    for pid_log in (server_pid_log, child_pid_log):
+        pid = int(pid_log.read_text(encoding="utf-8"))
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 @pytest.mark.parametrize(
     ("mode", "message"),
     [
+        ("minimal", "keys mismatch"),
         ("wrong_webshop_commit", "pinned WebShop commit"),
         ("empty_planu_commit", "checkout HEAD"),
         ("wrong_model", "scripted model policy"),
@@ -2333,39 +2411,17 @@ def test_webshop_smoke_rejects_tampered_authoritative_artifacts(
     mode,
     message,
 ):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    command_log = tmp_path / "commands.log"
-    planu_head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        text=True,
-    ).strip()
-    write_executable(
-        fake_bin / "curl",
-        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    environment, _, _, _ = local_smoke_environment(
+        tmp_path,
+        artifact_mode=mode,
     )
-    write_smoke_runner_fake(fake_bin / "planu-python")
-
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
-        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
-        env=script_environment(
-            fake_bin,
-            FAKE_ARTIFACT_MODE=mode,
-            FAKE_COMMAND_LOG=str(command_log),
-            FAKE_REAL_PYTHON=sys.executable,
-            FAKE_PLANU_HEAD=planu_head,
-            FAKE_SERVER_URL="https://shop.example",
-            PLANU_PYTHON="bin/planu-python",
-            RUN_ROOT="run",
-            WEBSHOP_ROOT="missing-webshop-checkout",
-            WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
-            WEBSHOP_URL="https://shop.example",
-        ),
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
     )
 
     assert completed.returncode != 0

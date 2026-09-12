@@ -483,6 +483,7 @@ def test_importing_planu_core_does_not_load_torch_or_ding():
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -559,6 +560,7 @@ for name in public_names:
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert completed.returncode == 0, completed.stderr
