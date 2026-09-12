@@ -27,6 +27,11 @@ from .nodes import ActionNode, LanguageNode
 from .scorers import ConstantActionScorer, HuggingFaceActionScorer
 from .search import PlanUSearch, TrajectoryResult
 from .selection import select_action
+from .text_backend import (
+    GenerationResult,
+    OpenAICompatibleBackend,
+    TextBackend,
+)
 
 __all__ = [
     "ActionCandidate",
@@ -40,9 +45,11 @@ __all__ = [
     "DistributionScorer",
     "EnvironmentAdapter",
     "EnvironmentState",
+    "GenerationResult",
     "HuggingFaceActionScorer",
     "LanguageNode",
     "NullCuriosity",
+    "OpenAICompatibleBackend",
     "PlanUConfig",
     "PlanUSearch",
     "QuantileDistribution",
@@ -50,6 +57,7 @@ __all__ = [
     "SelectionSchedule",
     "TrajectoryResult",
     "TransitionResult",
+    "TextBackend",
     "VirtualHomeAdapter",
     "VirtualHomeTask",
     "backup_trajectory",

@@ -1,4 +1,9 @@
 from .actions import WebShopAction, parse_action
+from .providers import (
+    ModelWebShopActionProvider,
+    ModelWebShopActionScorer,
+    ScriptedWebShopActionProvider,
+)
 
 
 def __getattr__(name):
@@ -22,6 +27,9 @@ def __getattr__(name):
 
 
 __all__ = [
+    "ModelWebShopActionProvider",
+    "ModelWebShopActionScorer",
+    "ScriptedWebShopActionProvider",
     "WebShopAction",
     "WebShopAdapter",
     "WebShopRuntime",
