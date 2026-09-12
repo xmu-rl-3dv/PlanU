@@ -51,6 +51,10 @@ class WebShopRunnerError(RuntimeError):
     """Raised when runner infrastructure cannot complete an experiment."""
 
 
+class _SanitizedWebShopRunnerError(WebShopRunnerError):
+    """Internally generated runner error whose message is safe to expose."""
+
+
 def _safe_failure_summary(error: Exception, context: str) -> str:
     return "WebShop infrastructure failure for {} ({})".format(
         context,
@@ -486,10 +490,10 @@ def _run(
                     output_dir / "results.jsonl",
                     result,
                 )
-            except WebShopRunnerError:
+            except _SanitizedWebShopRunnerError:
                 raise
             except Exception as error:
-                raise WebShopRunnerError(
+                raise _SanitizedWebShopRunnerError(
                     _safe_failure_summary(error, task_id)
                 ) from None
     return 0
@@ -503,10 +507,10 @@ def run(
     resolved_dependencies = dependencies or RunnerDependencies()
     try:
         return _run(args, resolved_dependencies)
-    except WebShopRunnerError:
+    except _SanitizedWebShopRunnerError:
         raise
     except Exception as error:
-        raise WebShopRunnerError(
+        raise _SanitizedWebShopRunnerError(
             _safe_failure_summary(error, "runner")
         ) from None
 

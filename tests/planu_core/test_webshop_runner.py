@@ -9,6 +9,7 @@ import pytest
 
 from planu_core.config import PlanUConfig
 from planu_core.text_backend import OpenAICompatibleBackend
+from planu_core.webshop import runner as webshop_runner
 from planu_core.webshop.runner import (
     WEBSHOP_COMMIT,
     RunnerDependencies,
@@ -687,6 +688,96 @@ def test_failure_traceback_suppresses_third_party_exception_chain(
     ):
         assert secret not in formatted
     assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_context"),
+    [
+        ("metadata", "runner"),
+        ("client", "runner"),
+        ("task", "fixed_7"),
+    ],
+)
+def test_dependency_supplied_runner_errors_are_not_trusted(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    failure_point,
+    expected_context,
+):
+    secret = "external-runner-error-secret"
+
+    def dependency_factory():
+        harness = DependencyHarness(tmp_path)
+        dependencies = harness.dependencies()
+
+        def fail(*args, **kwargs):
+            del args, kwargs
+            raise WebShopRunnerError(secret)
+
+        if failure_point == "metadata":
+            return replace(dependencies, metadata_factory=fail)
+        if failure_point == "client":
+            return replace(dependencies, client_factory=fail)
+
+        search = FakeSearch([], tmp_path)
+        search.run_iteration = fail
+        return replace(
+            dependencies,
+            search_factory=lambda *args, **kwargs: search,
+        )
+
+    args = smoke_args(
+        tmp_path,
+        "--task-start-index",
+        "7",
+        "--task-end-index",
+        "8",
+    )
+    with pytest.raises(WebShopRunnerError) as raised:
+        run(args, dependencies=dependency_factory())
+
+    message = str(raised.value)
+    formatted = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert message == (
+        "WebShop infrastructure failure for {} (WebShopRunnerError)".format(
+            expected_context
+        )
+    )
+    assert secret not in message
+    assert secret not in formatted
+    assert raised.value.__cause__ is None
+
+    monkeypatch.setattr(
+        webshop_runner,
+        "RunnerDependencies",
+        dependency_factory,
+    )
+    exit_code = webshop_runner.main(
+        [
+            "--smoke",
+            "--task-start-index",
+            "7",
+            "--task-end-index",
+            "8",
+            "--iterations",
+            "1",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.strip() == message
+    assert secret not in captured.err
 
 
 def test_openai_backend_close_releases_lazy_client_once():
