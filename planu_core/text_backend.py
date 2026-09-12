@@ -117,6 +117,15 @@ class OpenAICompatibleBackend:
         self.prompt_tokens = 0
         self.completion_tokens = 0
 
+    def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
     @property
     def model_identifier(self) -> str:
         return self._model

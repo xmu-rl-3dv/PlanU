@@ -2,9 +2,11 @@ from dataclasses import asdict, is_dataclass
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
+import tempfile
 from typing import Any, Callable, Mapping, Optional
 
 
@@ -124,10 +126,31 @@ def write_json_provenance(
         ("effective_config.json", effective_config),
         ("run_metadata.json", run_metadata),
     ):
-        (directory / filename).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        destination = directory / filename
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".{}.".format(filename),
+            suffix=".tmp",
+            dir=str(directory),
         )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(
+                    payload,
+                    handle,
+                    allow_nan=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, destination)
+        except BaseException:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
 
 
 __all__ = [

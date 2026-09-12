@@ -1,12 +1,14 @@
-python run.py \
-    --method planu\
-    --backend qwen-plus \
-    --task_start_index 1 \
-    --task_end_index 50 \
-    --n_generate_sample 5 \
-    --n_evaluate_sample 1 \
-    --prompt_sample cot \
-    --temperature 0.8 \
-    --iterations 10 \
-    --log logs/lats_1.log \
-    ${@}
+#!/usr/bin/env bash
+set -euo pipefail
+
+python -m planu_core.webshop.runner \
+  --backend qwen-plus \
+  --temperature 0.8 \
+  --prompt-mode cot \
+  --n-generate-sample 5 \
+  --n-evaluate-sample 1 \
+  --iterations 10 \
+  --depth 10 \
+  --task-start-index 1 \
+  --task-end-index 50 \
+  "$@"
