@@ -491,7 +491,7 @@ def _run(
             except Exception as error:
                 raise WebShopRunnerError(
                     _safe_failure_summary(error, task_id)
-                ) from error
+                ) from None
     return 0
 
 
@@ -508,7 +508,7 @@ def run(
     except Exception as error:
         raise WebShopRunnerError(
             _safe_failure_summary(error, "runner")
-        ) from error
+        ) from None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
