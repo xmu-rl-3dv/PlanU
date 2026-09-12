@@ -1,7 +1,10 @@
 import ast
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import traceback
 from types import SimpleNamespace
 
@@ -20,6 +23,23 @@ from planu_core.webshop.runner import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+WEBSHOP_SCRIPT = ROOT / "scripts" / "smoke_webshop.sh"
+WEBSHOP_BOOTSTRAP = ROOT / "scripts" / "bootstrap_webshop.sh"
+
+
+def write_executable(path, source):
+    path.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + source,
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def script_environment(bin_dir, **values):
+    environment = os.environ.copy()
+    environment.update(values)
+    environment["PATH"] = "{}:/usr/bin:/bin".format(bin_dir)
+    return environment
 
 
 class Closeable:
@@ -1351,3 +1371,366 @@ def test_legacy_shell_invokes_exact_reference_profile():
     ):
         assert option in source
     assert '"$@"' in source
+
+
+def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
+    bootstrap = WEBSHOP_BOOTSTRAP.read_text(encoding="utf-8")
+    smoke = WEBSHOP_SCRIPT.read_text(encoding="utf-8")
+
+    assert bootstrap.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+    assert "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd" in bootstrap
+    assert "https://github.com/princeton-nlp/WebShop.git" in bootstrap
+    assert "BASH_SOURCE[0]" in bootstrap
+    assert "python=3.8.13" in bootstrap
+    assert "setup.sh -d small" in bootstrap
+    assert "checkout --detach" in bootstrap
+    assert "reset --hard" not in bootstrap
+    assert "clean -f" not in bootstrap
+
+    assert smoke.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+    assert "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd" in smoke
+    assert "https://github.com/princeton-nlp/WebShop.git" in smoke
+    assert "BASH_SOURCE[0]" in smoke
+    assert "WEBSHOP_ROOT" in smoke
+    assert "WEBSHOP_URL" in smoke
+    assert "http://127.0.0.1:3000/fixed_1" in smoke
+    assert "-m web_agent_site.app --log --attrs" in smoke
+    for argument in (
+        "--smoke",
+        "--task-start-index 1",
+        "--task-end-index 2",
+        "--iterations 1",
+        "--depth 10",
+        "--smoke-search-query",
+    ):
+        assert argument in smoke
+    assert "mock" not in smoke.lower()
+    assert "pkill" not in smoke
+    assert "killall" not in smoke
+    assert "trap cleanup EXIT" in smoke
+    assert 'kill "${SERVER_PID}"' in smoke
+
+    for script in (WEBSHOP_BOOTSTRAP, WEBSHOP_SCRIPT):
+        syntax = subprocess.run(
+            ["bash", "-n", str(script)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+
+def test_webshop_bootstrap_checks_for_conda_before_clone(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git_log = tmp_path / "git.log"
+    write_executable(
+        fake_bin / "git",
+        'printf "%s\\n" "$*" >> "$FAKE_GIT_LOG"\n',
+    )
+    webshop_root = tmp_path / "WebShop"
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_GIT_LOG=str(git_log),
+            WEBSHOP_ROOT=str(webshop_root),
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "conda" in completed.stderr.lower()
+    assert not webshop_root.exists()
+    assert not git_log.exists()
+
+
+def test_webshop_bootstrap_reports_clone_network_failure(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    write_executable(
+        fake_bin / "git",
+        """
+if [[ "${1:-}" == "clone" ]]; then
+  printf 'transport failed\n' >&2
+  exit 1
+fi
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            WEBSHOP_ROOT=str(tmp_path / "WebShop"),
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "clone failed" in completed.stderr
+    assert "network" in completed.stderr
+
+
+def test_webshop_bootstrap_rejects_wrong_existing_remote_without_mutation(
+    tmp_path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git_log = tmp_path / "git.log"
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    sentinel = webshop_root / "user-change.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*) printf 'https://example.com/not-webshop.git\n' ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_GIT_LOG=str(git_log),
+            WEBSHOP_ROOT=str(webshop_root),
+        ),
+    )
+
+    commands = git_log.read_text(encoding="utf-8")
+    assert completed.returncode != 0
+    assert "remote" in completed.stderr.lower()
+    assert "checkout" not in commands
+    assert "fetch" not in commands
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_webshop_bootstrap_refuses_dirty_checkout_before_fetch(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git_log = tmp_path / "git.log"
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    sentinel = webshop_root / "user-change.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*) printf ' M user-change.txt\n' ;;
+  *"rev-parse HEAD"*) printf '0000000000000000000000000000000000000000\n' ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_GIT_LOG=str(git_log),
+            WEBSHOP_ROOT=str(webshop_root),
+        ),
+    )
+
+    commands = git_log.read_text(encoding="utf-8")
+    assert completed.returncode != 0
+    assert "uncommitted" in completed.stderr.lower()
+    assert "checkout" not in commands
+    assert "fetch" not in commands
+    assert "reset" not in commands
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_webshop_bootstrap_is_idempotent_after_verified_small_setup(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    setup_log = tmp_path / "setup.log"
+    conda_log = tmp_path / "conda.log"
+    setup_script = webshop_root / "setup.sh"
+    write_executable(
+        setup_script,
+        """
+printf 'setup %s\n' "$*" >> "$FAKE_SETUP_LOG"
+mkdir -p data search_engine/indexes
+touch data/items_shuffle_1000.json data/items_ins_v2_1000.json
+""",
+    )
+    write_executable(
+        fake_bin / "git",
+        """
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*) ;;
+  *"cat-file -e"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"symbolic-ref -q HEAD"*) exit 1 ;;
+esac
+""",
+    )
+    write_executable(
+        fake_bin / "conda",
+        """
+printf 'conda %s\n' "$*" >> "$FAKE_CONDA_LOG"
+if [[ "${1:-}" == "create" ]]; then
+  while (($#)); do
+    if [[ "$1" == "-p" ]]; then
+      prefix="$2"
+      break
+    fi
+    shift
+  done
+  mkdir -p "$prefix/bin"
+  cat > "$prefix/bin/python" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"platform.python_version"* ]]; then
+  printf '3.8.13\n'
+fi
+EOF
+  chmod +x "$prefix/bin/python"
+elif [[ "${1:-}" == "run" ]]; then
+  bash ./setup.sh -d small
+fi
+""",
+    )
+    environment = script_environment(
+        fake_bin,
+        FAKE_CONDA_LOG=str(conda_log),
+        FAKE_SETUP_LOG=str(setup_log),
+        WEBSHOP_ROOT=str(webshop_root),
+    )
+
+    first = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    second = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    conda_commands = conda_log.read_text(encoding="utf-8").splitlines()
+    assert sum("conda create " in line for line in conda_commands) == 1
+    assert sum("conda run " in line for line in conda_commands) == 1
+    assert setup_log.read_text(encoding="utf-8").splitlines() == [
+        "setup -d small"
+    ]
+
+
+def test_webshop_smoke_uses_reachable_server_and_verifies_artifacts(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    run_root = tmp_path / "run"
+    command_log = tmp_path / "commands.log"
+    write_executable(
+        fake_bin / "git",
+        """
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+esac
+""",
+    )
+    write_executable(
+        fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    )
+    write_executable(
+        fake_bin / "planu-python",
+        """
+if [[ "${1:-}" == "-" ]]; then
+  exec "$FAKE_REAL_PYTHON" "$@"
+fi
+printf 'python %s\n' "$*" >> "$FAKE_COMMAND_LOG"
+output_dir=''
+while (($#)); do
+  if [[ "$1" == "--output-dir" ]]; then
+    output_dir="$2"
+    break
+  fi
+  shift
+done
+mkdir -p "$output_dir/tasks"
+metadata='{"model_id":"scripted","server_url":"https://shop.example","webshop_commit":"64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"}'
+effective='{"args":{"depth":10,"iterations":1,"smoke":true,"task_end_index":2,"task_start_index":1}}'
+task='{"task_id":"fixed_1","task_index":1,"trajectory":[{"action":"search[product]"},{"action":"click[A1]"},{"action":"click[Buy Now]"}],"search_iterations":1,"max_depth":10,"provenance":'"$metadata"'}'
+printf '{"effective_config":%s,"run_metadata":%s}\n' \
+  "$effective" "$metadata" > "$output_dir/run_manifest.json"
+printf '%s\n' "$effective" > "$output_dir/effective_config.json"
+printf '%s\n' "$metadata" > "$output_dir/run_metadata.json"
+printf '%s\n' "$task" > "$output_dir/tasks/fixed_1.json"
+printf '%s\n' "$task" > "$output_dir/results.jsonl"
+""",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_REAL_PYTHON=sys.executable,
+            PLANU_PYTHON=str(fake_bin / "planu-python"),
+            RUN_ROOT=str(run_root),
+            WEBSHOP_ROOT=str(webshop_root),
+            WEBSHOP_URL="https://shop.example",
+        ),
+    )
+
+    commands = command_log.read_text(encoding="utf-8")
+    assert completed.returncode == 0, completed.stderr
+    assert "https://shop.example/fixed_1" in commands
+    assert "--smoke" in commands
+    assert "--iterations 1" in commands
+    assert "--depth 10" in commands
+    assert "--task-start-index 1 --task-end-index 2" in commands
+    assert '"http_transition_count": 3' in completed.stdout
+    assert '"quantile_backup_count": 1' in completed.stdout
