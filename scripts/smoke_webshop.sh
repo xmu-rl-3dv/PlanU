@@ -118,9 +118,23 @@ server_reachable() {
 }
 
 configure_java_runtime() {
+  local java_version_output
+  local java_version_line
+
   JAVA_HOME="${WEBSHOP_ENV_PREFIX}/lib/jvm"
   [[ -x "${JAVA_HOME}/bin/java" ]] ||
     fail "Conda Java runtime is missing: ${JAVA_HOME}/bin/java"
+  if ! java_version_output="$("${JAVA_HOME}/bin/java" -version 2>&1)"; then
+    java_version_line="${java_version_output%%$'\n'*}"
+    fail "could not run ${JAVA_HOME}/bin/java -version: ${java_version_line:-no output}"
+  fi
+  java_version_line="${java_version_output%%$'\n'*}"
+  case "${java_version_line}" in
+    'openjdk version "11.'* | 'java version "11.'*) ;;
+    *)
+      fail "Java 11 is required at ${JAVA_HOME}/bin/java; found: ${java_version_line:-no version output}"
+      ;;
+  esac
   export JAVA_HOME
   export PATH="${JAVA_HOME}/bin:${PATH}"
 }

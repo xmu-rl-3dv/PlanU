@@ -36,6 +36,17 @@ def write_executable(path, source):
     path.chmod(0o755)
 
 
+def write_fake_java(path, version_line='openjdk version "11.0.22"'):
+    write_executable(
+        path,
+        """
+[[ "$*" == "-version" ]] || exit 91
+printf '%s\\n' "$FAKE_JAVA_VERSION_LINE" >&2
+""",
+    )
+    return version_line
+
+
 def script_environment(bin_dir, **values):
     environment = os.environ.copy()
     environment.update(values)
@@ -262,7 +273,13 @@ PY
     )
 
 
-def local_smoke_environment(tmp_path, *, artifact_mode="valid", resistant=False):
+def local_smoke_environment(
+    tmp_path,
+    *,
+    artifact_mode="valid",
+    java_version_line='openjdk version "11.0.22"',
+    resistant=False,
+):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     webshop_root = tmp_path / "WebShop"
@@ -271,7 +288,7 @@ def local_smoke_environment(tmp_path, *, artifact_mode="valid", resistant=False)
     (env_prefix / "bin").mkdir(parents=True)
     java_bin = env_prefix / "lib" / "jvm" / "bin"
     java_bin.mkdir(parents=True)
-    write_executable(java_bin / "java", "exit 0\n")
+    write_fake_java(java_bin / "java", java_version_line)
     server_pid_log = tmp_path / "server.pid"
     child_pid_log = tmp_path / "child.pid"
     server_env_log = tmp_path / "server.env"
@@ -342,6 +359,7 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_ARTIFACT_MODE=artifact_mode,
         FAKE_CHILD_PID_LOG=str(child_pid_log),
         FAKE_COMMAND_LOG=str(command_log),
+        FAKE_JAVA_VERSION_LINE=java_version_line,
         FAKE_PLANU_HEAD=planu_head,
         FAKE_PROJECT_ROOT=str(ROOT),
         FAKE_REAL_PYTHON=sys.executable,
@@ -360,7 +378,12 @@ kill -0 "$server_pid" 2>/dev/null
     return environment, command_log, server_pid_log, child_pid_log
 
 
-def bootstrap_server_environment(tmp_path, *, include_java=True):
+def bootstrap_server_environment(
+    tmp_path,
+    *,
+    include_java=True,
+    java_version_line='openjdk version "11.0.22"',
+):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     webshop_root = tmp_path / "WebShop"
@@ -381,7 +404,7 @@ def bootstrap_server_environment(tmp_path, *, include_java=True):
     if include_java:
         java_bin = env_prefix / "lib" / "jvm" / "bin"
         java_bin.mkdir(parents=True)
-        write_executable(java_bin / "java", "exit 0\n")
+        write_fake_java(java_bin / "java", java_version_line)
     server_pid_log = tmp_path / "server.pid"
     server_env_log = tmp_path / "server.env"
     write_executable(
@@ -390,6 +413,7 @@ def bootstrap_server_environment(tmp_path, *, include_java=True):
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
+  printf 'import\n' > "$FAKE_IMPORT_LOG"
   java_home="$FAKE_ENV_PREFIX/lib/jvm"
   [[ "${JAVA_HOME:-}" == "$java_home" ]] || exit 21
   case ":$PATH:" in
@@ -445,6 +469,8 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         fake_bin,
         FAKE_GIT_LOG=str(git_log),
         FAKE_ENV_PREFIX=str(env_prefix),
+        FAKE_IMPORT_LOG=str(tmp_path / "import.log"),
+        FAKE_JAVA_VERSION_LINE=java_version_line,
         FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
@@ -2061,7 +2087,7 @@ def test_webshop_bootstrap_rejects_empty_lucene_index(tmp_path):
     (env_prefix / "bin").mkdir(parents=True)
     java_bin = env_prefix / "lib" / "jvm" / "bin"
     java_bin.mkdir(parents=True)
-    write_executable(java_bin / "java", "exit 0\n")
+    java_version_line = write_fake_java(java_bin / "java")
     write_executable(
         env_prefix / "bin" / "python",
         """
@@ -2101,6 +2127,7 @@ esac
         text=True,
         env=script_environment(
             fake_bin,
+            FAKE_JAVA_VERSION_LINE=java_version_line,
             FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
             WEBSHOP_ROOT=str(webshop_root),
         ),
@@ -2111,14 +2138,27 @@ esac
     assert "index" in completed.stderr.lower()
 
 
-def test_webshop_bootstrap_configures_resolved_conda_java_for_server(tmp_path):
+@pytest.mark.parametrize(
+    "java_version_line",
+    [
+        'openjdk version "11.0.22"\nOpenJDK Runtime Environment',
+        'java version "11.0.24"',
+    ],
+)
+def test_webshop_bootstrap_configures_resolved_conda_java_for_server(
+    tmp_path,
+    java_version_line,
+):
     (
         environment,
         webshop_root,
         env_prefix,
         git_log,
         server_env_log,
-    ) = bootstrap_server_environment(tmp_path)
+    ) = bootstrap_server_environment(
+        tmp_path,
+        java_version_line=java_version_line,
+    )
     environment["WEBSHOP_ENV_PREFIX"] = "WebShop/custom-env"
     environment["WEBSHOP_ROOT"] = "WebShop"
 
@@ -2235,8 +2275,10 @@ elif [[ "$command" == "install" ]]; then
   [[ "$*" == "install -y -p $FAKE_ENV_PREFIX -c conda-forge openjdk=11" ]] ||
     exit 51
   mkdir -p "$FAKE_ENV_PREFIX/lib/jvm/bin"
-  printf '#!/usr/bin/env bash\nexit 0\n' \
-    > "$FAKE_ENV_PREFIX/lib/jvm/bin/java"
+  cat > "$FAKE_ENV_PREFIX/lib/jvm/bin/java" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'openjdk version "11.0.22"' >&2
+EOF
   chmod +x "$FAKE_ENV_PREFIX/lib/jvm/bin/java"
 elif [[ "$command" == "run" ]]; then
   java_home="$FAKE_ENV_PREFIX/lib/jvm"
@@ -2310,6 +2352,40 @@ def test_webshop_bootstrap_fails_clearly_when_conda_java_is_missing(tmp_path):
     assert not server_env_log.exists()
 
 
+@pytest.mark.parametrize(
+    ("java_version_line", "expected_version"),
+    [
+        ("", "no version output"),
+        ('java version "1.8.0_402"', 'java version "1.8.0_402"'),
+        ('openjdk version "17.0.10"', 'openjdk version "17.0.10"'),
+    ],
+)
+def test_webshop_bootstrap_rejects_non_java_11_before_import(
+    tmp_path,
+    java_version_line,
+    expected_version,
+):
+    environment, _, _, _, server_env_log = bootstrap_server_environment(
+        tmp_path,
+        java_version_line=java_version_line,
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "Java 11" in completed.stderr
+    assert expected_version in completed.stderr
+    assert not Path(environment["FAKE_IMPORT_LOG"]).exists()
+    assert not server_env_log.exists()
+
+
 def test_webshop_bootstrap_is_idempotent_after_verified_small_setup(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2362,7 +2438,10 @@ if [[ "${1:-}" == "create" ]]; then
     shift
   done
   mkdir -p "$prefix/bin" "$prefix/lib/jvm/bin"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$prefix/lib/jvm/bin/java"
+  cat > "$prefix/lib/jvm/bin/java" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'openjdk version "11.0.22"' >&2
+EOF
   chmod +x "$prefix/lib/jvm/bin/java"
   cat > "$prefix/bin/python" <<'EOF'
 #!/usr/bin/env bash
@@ -2470,11 +2549,20 @@ def test_webshop_smoke_rejects_external_server_even_with_asserted_commit(
     assert not command_log.exists()
 
 
+@pytest.mark.parametrize(
+    "java_version_line",
+    [
+        'openjdk version "11.0.22"\nOpenJDK Runtime Environment',
+        'java version "11.0.24"',
+    ],
+)
 def test_webshop_smoke_starts_pinned_local_checkout_and_verifies_artifacts(
     tmp_path,
+    java_version_line,
 ):
     environment, command_log, server_pid_log, _ = local_smoke_environment(
-        tmp_path
+        tmp_path,
+        java_version_line=java_version_line,
     )
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
@@ -2526,6 +2614,43 @@ def test_webshop_smoke_fails_clearly_when_conda_java_is_missing(tmp_path):
     assert str(java) in completed.stderr
     assert not server_pid_log.exists()
     assert not (tmp_path / "server.env").exists()
+
+
+@pytest.mark.parametrize(
+    ("java_version_line", "expected_version"),
+    [
+        ("", "no version output"),
+        ('java version "1.8.0_402"', 'java version "1.8.0_402"'),
+        ('openjdk version "17.0.10"', 'openjdk version "17.0.10"'),
+    ],
+)
+def test_webshop_smoke_rejects_non_java_11_before_server_start(
+    tmp_path,
+    java_version_line,
+    expected_version,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        java_version_line=java_version_line,
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "Java 11" in completed.stderr
+    assert expected_version in completed.stderr
+    assert not server_pid_log.exists()
+    assert not (tmp_path / "server.env").exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
 
 
 def test_webshop_smoke_rejects_git_subdirectory_root(tmp_path):
