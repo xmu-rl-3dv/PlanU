@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import zipfile
 
+from packaging.requirements import Requirement
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACKAGE_MEMBERS = {
@@ -90,6 +92,10 @@ def _relative_archive_members(names):
         if relative_member.startswith("blockworld/"):
             members.add(relative_member.removeprefix("blockworld/"))
     return members
+
+
+def _requirement_key(requirement):
+    return "{}{}".format(requirement.name.lower(), requirement.specifier)
 
 
 class PackagingTest(unittest.TestCase):
@@ -186,6 +192,10 @@ assert "fairscale" not in sys.modules
                     name for name in wheel_members if name.endswith("/METADATA")
                 )
                 metadata = email.message_from_bytes(archive.read(metadata_name))
+            parsed_requirements = [
+                Requirement(requirement)
+                for requirement in metadata.get_all("Requires-Dist", [])
+            ]
 
             self.assertLessEqual(EXPECTED_PACKAGE_MEMBERS, source_members)
             self.assertLessEqual(EXPECTED_PACKAGE_MEMBERS, wheel_members)
@@ -194,25 +204,33 @@ assert "fairscale" not in sys.modules
             self.assertEqual(metadata["Requires-Python"], ">=3.9")
             self.assertEqual(
                 {
-                    requirement.lower()
-                    for requirement in metadata.get_all("Requires-Dist", [])
-                    if "extra ==" not in requirement
+                    _requirement_key(requirement)
+                    for requirement in parsed_requirements
+                    if requirement.marker is None
                 },
                 REQUIRED_RUNTIME_DEPENDENCIES,
             )
             optional_requirements = {
-                requirement.lower()
-                for requirement in metadata.get_all("Requires-Dist", [])
-                if "extra ==" in requirement
+                requirement.name.lower()
+                for requirement in parsed_requirements
+                if requirement.marker is not None
             }
             for dependency in OPTIONAL_PROVIDER_DEPENDENCIES:
-                self.assertTrue(
-                    any(
-                        requirement.startswith(dependency)
-                        for requirement in optional_requirements
-                    ),
-                    dependency,
-                )
+                self.assertIn(dependency, optional_requirements)
+            rnd_requirements = {
+                _requirement_key(requirement)
+                for requirement in parsed_requirements
+                if requirement.marker is not None
+                and requirement.marker.evaluate({"extra": "rnd"})
+            }
+            for requirement in (
+                "di-engine==0.5.3",
+                "easydict==1.13",
+                "gym==0.25.1",
+                "numpy==1.23.5",
+                "werkzeug==2.0.3",
+            ):
+                self.assertIn(requirement, rnd_requirements)
             self.assertEqual(
                 metadata["Home-page"],
                 "https://github.com/xmu-rl-3dv/PlanU",

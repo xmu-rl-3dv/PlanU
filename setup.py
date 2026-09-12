@@ -23,7 +23,13 @@ OPTIONAL_DEPENDENCIES = {
     "llama-cpp": ["llama-cpp-python", "scipy"],
     "openai": ["openai", "optimum"],
     "quantization": ["bitsandbytes"],
-    "rnd": ["DI-engine", "easydict"],
+    "rnd": [
+        "DI-engine==0.5.3",
+        "easydict==1.13",
+        "gym==0.25.1",
+        "numpy==1.23.5",
+        "Werkzeug==2.0.3",
+    ],
 }
 OPTIONAL_DEPENDENCIES["all"] = sorted(
     {

@@ -56,6 +56,29 @@ ENTERTAINMENT_PARITY_SHA256 = (
 )
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "virtual-home/virtual_home/envs/graph_env_v1.py",
+        "virtual-home/virtual_home/envs/graph_env_v2.py",
+        (
+            "virtual-home/virtual_home/simulation/environment/"
+            "unity_environment.py"
+        ),
+    ],
+)
+def test_graph_environments_do_not_require_ipdb_at_import_time(relative_path):
+    tree = ast.parse(Path(relative_path).read_text(encoding="utf-8"))
+    imported_modules = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+
+    assert "ipdb" not in imported_modules
+
+
 def _food_cases():
     for room in range(4):
         for tail in itertools.product((0, 1), repeat=7):
@@ -1224,8 +1247,14 @@ def test_token_log_prefix_is_preserved_and_appends_config_hash(
     )
 
 
-def test_virtualhome_shell_targets_existing_entertainment_runner():
+def test_virtualhome_shell_runs_both_reference_tasks():
     shell = Path("scripts/PlanU_Virtualhome.sh").read_text()
 
+    assert shell.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+    assert "mcts/virtualhome/PlanU_inference_food.py" in shell
     assert "mcts/virtualhome/PlanU_entertainment.py" in shell
     assert "PlanU_inference_entertainment.py" not in shell
+    assert shell.count("--maxiterations 1000") == 2
+    assert shell.count('--rnd "True"') == 2
+    assert "PYTHON=" in shell
+    assert "BASE_MODEL=" in shell

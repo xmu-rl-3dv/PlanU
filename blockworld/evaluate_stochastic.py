@@ -8,7 +8,7 @@ from pathlib import Path
 import random
 import re
 import sys
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 
 def _preconfigure_cuda_visibility(argv):
@@ -24,6 +24,7 @@ _preconfigure_cuda_visibility(sys.argv[1:])
 import numpy as np
 
 PLANU_ROOT = str(Path(__file__).resolve().parents[1])
+BLOCKWORLD_ROOT = Path(__file__).resolve().parent
 if PLANU_ROOT not in sys.path:
     sys.path.insert(0, PLANU_ROOT)
 
@@ -32,6 +33,7 @@ from reasoners.algorithm import MCTS, PlanU
 import reasoners.benchmark.bw_utils as utils
 from reasoners.benchmark import BWEvaluator
 from reasoners.lm import HFModel
+from planu_core.adapters.blockworld import BWStateRAP
 from planu_core.provenance import (
     build_effective_config,
     build_run_metadata,
@@ -50,11 +52,18 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
 
-def parse_args():
+def _positive_int(value):
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run BlocksWorld evaluation.")
     parser.add_argument('-a', '--algorithm', choices=['mcts', 'planu'], required=True,
                         help="Specify the algorithm to use (MCTS or PlanU).")
-    parser.add_argument('-g', '--gpu', type=int, required=True,
+    parser.add_argument('-g', '--gpu', type=int,
                     help="Specify the GPU ID to use, e.g., -g 0 for GPU 0.")
     parser.add_argument('-v', '--version', choices=['1', '2'], required=True,
                         help="Specify the version of the prompt to use (v1 or v2).")
@@ -68,8 +77,71 @@ def parse_args():
                         help="Number of search iterations.")
     parser.add_argument('--success-probability', type=float, default=0.8,
                         help="Probability that a BlockWorld action succeeds.")
+    parser.add_argument(
+        "--model",
+        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        help="Hugging Face model and tokenizer identifier.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Execution device; auto selects CUDA when available.",
+    )
+    parser.add_argument(
+        "--max-examples",
+        type=_positive_int,
+        default=None,
+        help="Optional dataset limit for smoke runs; omitted for paper runs.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional root directory for evaluator logs.",
+    )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def resolve_device(requested: str, cuda_available: bool) -> str:
+    if requested == "auto":
+        return "cuda" if cuda_available else "cpu"
+    if requested == "cuda" and not cuda_available:
+        raise ValueError("CUDA was requested but is not available")
+    return requested
+
+
+def _model_placement_metadata(
+    model: Any,
+    requested_device: str,
+    resolved_device: str,
+    cuda_visible_devices: Optional[str],
+    cuda_device_names: Sequence[str],
+):
+    raw_device_map = getattr(
+        getattr(model, "model", None),
+        "hf_device_map",
+        None,
+    )
+    if isinstance(raw_device_map, Mapping):
+        device_map = {
+            str(name): str(device)
+            for name, device in sorted(
+                raw_device_map.items(),
+                key=lambda item: str(item[0]),
+            )
+        }
+    elif raw_device_map is None:
+        device_map = None
+    else:
+        device_map = str(raw_device_map)
+    return {
+        "requested_device": requested_device,
+        "resolved_device": resolved_device,
+        "hf_device_map": device_map,
+        "cuda_visible_devices": cuda_visible_devices,
+        "cuda_device_names": list(cuda_device_names),
+    }
 
 
 def benchmark_paths(version: str, steps: str) -> tuple[str, str]:
@@ -94,17 +166,47 @@ def _build_effective_run_config(
     algorithm_config,
     model_identifier,
     depth,
+    resolved_device,
 ):
     effective_config = build_effective_config(
         args,
         algorithm_config,
         config_name="{}_config".format(args.algorithm),
     )
+    effective_config["args"].pop("output_dir", None)
     effective_config.update(
         {
             "model_identifier": model_identifier,
             "depth": depth,
             "success_probability": args.success_probability,
+            "model": {
+                "identifier": model_identifier,
+                "requested_device": args.device,
+                "device": resolved_device,
+                "max_batch_size": 1,
+                "max_new_tokens": 200,
+                "max_length": 2048,
+            },
+            "benchmark": {
+                "prompt_path": benchmark_paths(
+                    "v{}".format(args.version),
+                    args.steps,
+                )[0],
+                "data_path": benchmark_paths(
+                    "v{}".format(args.version),
+                    args.steps,
+                )[1],
+                "config_file": (
+                    "examples/CoT/blocksworld/data/bw_config.yaml"
+                ),
+                "domain_file": (
+                    "examples/CoT/blocksworld/data/generated_domain.pddl"
+                ),
+                "max_steps": 12,
+                "num_shot": 4,
+                "shuffle_prompt": True,
+                "max_examples": args.max_examples,
+            },
         }
     )
     return effective_config
@@ -114,7 +216,7 @@ def _build_log_dir(
     args,
     model_identifier,
     effective_config_hash,
-    base_dir="logs",
+    base_dir=BLOCKWORLD_ROOT / "logs",
 ):
     model_path = model_identifier.replace("/", "--")
     return (
@@ -127,12 +229,6 @@ def _build_log_dir(
 
 
 BWAction = str
-
-class BWStateRAP(NamedTuple):
-    step_idx: int
-    last_blocks_state: str
-    blocks_state: str
-    buffered_action: BWAction
 
 
 class BlocksWorldModelRAP(WorldModel):
@@ -360,20 +456,26 @@ if __name__ == "__main__":
     version = f"v{args.version}"
     steps = args.steps
     prompt_path, data_path = benchmark_paths(version, steps)
+    prompt_path = BLOCKWORLD_ROOT / prompt_path
+    data_path = BLOCKWORLD_ROOT / data_path
 
     with open(prompt_path) as f:
         prompt = json.load(f)
 
     print(f"Loaded prompt from {prompt_path}")
     print(f"Data path set to {data_path}")
-    llama_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    llama_path = args.model
+    resolved_device = resolve_device(
+        args.device,
+        torch.cuda.is_available(),
+    )
     model = HFModel(
-    model_pth=llama_path,
-    tokenizer_pth=llama_path,
-    device=torch.device('cuda'),
-    max_batch_size=1,
-    max_new_tokens=200,
-    max_length=2048
+        model_pth=llama_path,
+        tokenizer_pth=llama_path,
+        device=torch.device(resolved_device),
+        max_batch_size=1,
+        max_new_tokens=200,
+        max_length=2048,
     )
 
     print("Model and tokenizer successfully loaded!")
@@ -430,23 +532,44 @@ if __name__ == "__main__":
         algorithm_config,
         llama_path,
         depth_l,
+        resolved_device,
     )
     effective_config_hash = config_hash(effective_config)
     run_metadata = build_run_metadata(repository_root=PLANU_ROOT)
+    run_metadata["model_placement"] = _model_placement_metadata(
+        model,
+        requested_device=args.device,
+        resolved_device=resolved_device,
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        cuda_device_names=[
+            torch.cuda.get_device_name(index)
+            for index in range(torch.cuda.device_count())
+        ],
+    )
     log_dir = _build_log_dir(
         args,
         llama_path,
         effective_config_hash,
+        base_dir=(
+            args.output_dir
+            if args.output_dir is not None
+            else BLOCKWORLD_ROOT / "logs"
+        ),
     )
+    run_metadata["output_dir"] = os.fspath(log_dir)
     write_json_provenance(log_dir, effective_config, run_metadata)
 
     reasoner_rap = Reasoner(world_model=world_model, search_config=config, search_algo=algorithm)
 
-    evaluator = BWEvaluator(config_file='examples/CoT/blocksworld/data/bw_config.yaml',
-                            domain_file='examples/CoT/blocksworld/data/generated_domain.pddl',
+    evaluator = BWEvaluator(config_file=os.fspath(
+                                BLOCKWORLD_ROOT / "examples/CoT/blocksworld/data/bw_config.yaml"),
+                            domain_file=os.fspath(
+                                BLOCKWORLD_ROOT / "examples/CoT/blocksworld/data/generated_domain.pddl"),
                             data_path=data_path,
                             init_prompt=prompt,
                             output_extractor=bfs_bw_extractor)
+    if args.max_examples is not None:
+        evaluator.full_dataset = evaluator.full_dataset[:args.max_examples]
 
     os.environ["VERSION"] = f"v{args.version}"
     os.environ["STEPS"] = args.steps

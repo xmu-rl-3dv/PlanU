@@ -1,8 +1,28 @@
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Hashable, Mapping, Optional, Protocol, Sequence
+from typing import Any, Hashable, Iterator, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
+
+
+class _FrozenMapping(Mapping[str, Any]):
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        self._values = MappingProxyType(dict(values))
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __reduce__(self):
+        return type(self), (dict(self._values),)
+
+    def __repr__(self) -> str:
+        return repr(dict(self._values))
 
 
 @dataclass(frozen=True)
@@ -20,7 +40,7 @@ class ActionCandidate:
         object.__setattr__(
             self,
             "metadata",
-            MappingProxyType(dict(self.metadata)),
+            _FrozenMapping(self.metadata),
         )
 
 

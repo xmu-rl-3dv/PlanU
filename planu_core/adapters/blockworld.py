@@ -3,7 +3,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
-from typing import Any, Hashable, Optional, Sequence, Tuple
+from typing import Any, Hashable, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -13,6 +13,13 @@ from planu_core.interfaces import (
     EnvironmentState,
     TransitionResult,
 )
+
+
+class BWStateRAP(NamedTuple):
+    step_idx: int
+    last_blocks_state: str
+    blocks_state: str
+    buffered_action: str
 
 
 def _scalar_finite(value: Any, name: str) -> float:

@@ -6,6 +6,11 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 README_PATH = REPOSITORY_ROOT / "README.md"
 OVERCOOKED_SCRIPT = REPOSITORY_ROOT / "scripts" / "PlanU_overcooked.sh"
+SMOKE_SCRIPT = REPOSITORY_ROOT / "scripts" / "smoke_phase_one.sh"
+EXPERIMENT_REQUIREMENTS = (
+    REPOSITORY_ROOT / "requirements-experiments.txt"
+)
+EXPERIMENT_LOCK = REPOSITORY_ROOT / "requirements-experiments-lock.txt"
 
 
 def _readme():
@@ -153,7 +158,7 @@ def test_readme_installation_keeps_benchmark_environments_external():
 
     for term in ("Python 3.9", "`gym-macro-overcooked`", "`virtual-home`", "external"):
         assert term in installation
-    assert "python -m pip install -e ." in installation
+    assert "python -m pip install --no-deps -e ." in installation
 
 
 def test_readme_documents_complete_overcooked_setup():
@@ -168,11 +173,13 @@ def test_readme_documents_complete_overcooked_setup():
     assert len(bash_blocks) == 1
     installation_commands = bash_blocks[0].splitlines()
     required_commands = (
-        "python -m pip install -r requirements.txt",
-        "python -m pip install easydict DI-engine",
-        "python -m pip install -e .",
-        "python -m pip install -e gym-macro-overcooked",
-        "python -m pip install -e virtual-home",
+        (
+            "python -m pip install -r requirements-experiments.txt "
+            "-c requirements-experiments-lock.txt"
+        ),
+        "python -m pip install --no-deps -e .",
+        "python -m pip install --no-deps -e gym-macro-overcooked",
+        "python -m pip install --no-deps -e virtual-home",
     )
     assert all(command in installation_commands for command in required_commands)
     assert [installation_commands.index(command) for command in required_commands] == sorted(
@@ -181,6 +188,64 @@ def test_readme_documents_complete_overcooked_setup():
 
     for term in ("DI-engine", "easydict", "RND"):
         assert term in installation_section
+
+
+def test_experiment_lock_pins_resolved_transitive_dependencies():
+    requirements = set(
+        line.strip()
+        for line in EXPERIMENT_LOCK.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+
+    for requirement in (
+        "gymnasium==1.1.1",
+        "huggingface_hub==0.36.2",
+        "scipy==1.13.1",
+        "wandb==0.12.16",
+    ):
+        assert requirement in requirements
+
+
+def test_experiment_requirements_pin_compatible_runtime_versions():
+    requirements = set(
+        line.strip()
+        for line in EXPERIMENT_REQUIREMENTS.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+
+    for requirement in (
+        "numpy==1.23.5",
+        "gym==0.25.1",
+        "opencv-python==4.8.1.78",
+        "DI-engine==0.5.3",
+        "Werkzeug==2.0.3",
+        "torch==2.8.0",
+        "transformers==4.57.6",
+    ):
+        assert requirement in requirements
+
+
+def test_phase_one_smoke_script_covers_all_real_runners():
+    script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+    assert "34e6841f81ca7708f2f8b8241504bfe8a908e40b" in script
+    assert "actual_planbench_commit" in script
+    assert "mcts/overcooked/PlanU_inference.py" in script
+    assert "mcts/virtualhome/PlanU_inference_food.py" in script
+    assert "mcts/virtualhome/PlanU_entertainment.py" in script
+    assert "blockworld/evaluate_stochastic.py" in script
+    assert script.count("--maxiterations 1") == 3
+    assert "--max-examples 1" in script
+    assert "PLANBENCH_PATH" in script
+    assert "SMOKE_MODEL" in script
+
+
+def test_readme_links_phase_one_experiment_validation_matrix():
+    assert (
+        "[Phase-One Experiment Validation](docs/experiment-validation.md)"
+        in _readme()
+    )
 
 
 def test_readme_has_exactly_one_overcooked_experiment_invocation():
@@ -212,10 +277,12 @@ def test_readme_scopes_model_and_device_configuration_by_benchmark():
         "success probability",
         "`blockworld/evaluate_stochastic.py`",
         "HF model identifier",
-        "source edit",
+        "`--model`",
+        "`--device`",
+        "`--max-examples`",
     ):
         assert term in configuration
-    assert "without editing hardcoded source locations" not in readme
+    assert "without editing hardcoded source locations" in configuration
 
 
 def test_readme_scopes_provenance_to_supported_runners():

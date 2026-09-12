@@ -2,6 +2,8 @@ from dataclasses import FrozenInstanceError
 from inspect import signature
 from typing import Hashable, Mapping, Optional, Sequence, get_type_hints
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -224,6 +226,21 @@ def test_action_candidate_metadata_is_immutable():
         candidate.metadata = {}
     with pytest.raises(TypeError):
         candidate.metadata["source"] = "changed"
+
+
+def test_action_candidate_metadata_survives_pickle_round_trip():
+    candidate = ActionCandidate(
+        "open",
+        4,
+        "open microwave",
+        {"source": "blockworld"},
+    )
+
+    restored = pickle.loads(pickle.dumps(candidate))
+
+    assert restored.metadata == {"source": "blockworld"}
+    with pytest.raises(TypeError):
+        restored.metadata["source"] = "changed"
 
 
 def test_action_candidate_equality_and_hash_depend_only_on_key():

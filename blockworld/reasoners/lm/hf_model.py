@@ -10,6 +10,7 @@ import numpy as np
 from accelerate import infer_auto_device_map, dispatch_model
 
 from .. import LanguageModel,GenerateOutput
+from planu_core.scorers import _device_map_for
 
 
 class HFModel(LanguageModel):
@@ -29,6 +30,11 @@ class HFModel(LanguageModel):
             peft_pth (str, optional): The path to the directory containing the pre-trained PEFT model. Defaults to None.
             load_awq_pth (str, optional): The path to the directory containing the pre-trained AWQ model. Defaults to None.
         """
+        resolved_device_map = (
+            _device_map_for(device)
+            if device_map is None
+            else device_map
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_pth, lagacy=False, trust_remote_code=True)
 
         if quantized == "int8":
@@ -38,7 +44,7 @@ class HFModel(LanguageModel):
                 model_pth,
                 quantization_config=quantization_config,
                 trust_remote_code=True,
-                device_map="auto" if device_map is None else device_map,
+                device_map=resolved_device_map,
             )
         elif quantized == "nf4" or quantized  == "fp4":
             bnb_config = BitsAndBytesConfig(
@@ -53,7 +59,7 @@ class HFModel(LanguageModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_pth,
                 quantization_config=bnb_config,
-                device_map="auto",
+                device_map=resolved_device_map,
                 trust_remote_code=True
             )
 
@@ -85,7 +91,7 @@ class HFModel(LanguageModel):
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_pth,
-                device_map="auto",
+                device_map=resolved_device_map,
                 trust_remote_code=True
             )
         if peft_pth is not None:

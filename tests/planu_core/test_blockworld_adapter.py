@@ -960,10 +960,7 @@ def test_evaluate_cli_compiles_and_has_reachable_seeded_planu_branch():
     assert "MCTS(" in ast.unparse(branch.body)
 
 
-def test_evaluate_entrypoint_imports_without_a_deepseek_model(
-    monkeypatch,
-    tmp_path,
-):
+def _load_evaluate_entrypoint(monkeypatch):
     reasoners = types.ModuleType("reasoners")
     reasoners.__path__ = []
     reasoners.LanguageModel = object
@@ -1002,6 +999,14 @@ def test_evaluate_entrypoint_imports_without_a_deepseek_model(
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_evaluate_entrypoint_imports_without_a_deepseek_model(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_evaluate_entrypoint(monkeypatch)
 
     monkeypatch.setattr(
         sys,
@@ -1035,15 +1040,27 @@ def test_evaluate_entrypoint_imports_without_a_deepseek_model(
         assert (EVALUATE_PATH.parent / relative_path).is_file()
 
     args = module.parse_args()
+    assert args.model == "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    assert args.device == "auto"
+    assert args.max_examples is None
     effective = module._build_effective_run_config(
         args,
         {"depth_limit": 10, "n_iters": 10},
         "deepseek/model",
         10,
+        "cpu",
     )
     assert effective["args"]["success_probability"] == 0.8
+    assert "output_dir" not in effective["args"]
     assert effective["model_identifier"] == "deepseek/model"
     assert effective["depth"] == 10
+    assert effective["benchmark"]["max_steps"] == 12
+    assert effective["benchmark"]["num_shot"] == 4
+    assert effective["benchmark"]["shuffle_prompt"] is True
+    assert effective["model"]["requested_device"] == "auto"
+    assert effective["model"]["device"] == "cpu"
+    assert effective["model"]["max_new_tokens"] == 200
+    assert effective["model"]["max_length"] == 2048
     assert effective["planu_config"] == {
         "depth_limit": 10,
         "n_iters": 10,
@@ -1056,6 +1073,78 @@ def test_evaluate_entrypoint_imports_without_a_deepseek_model(
     )
     assert "seed=100" in log_dir.parts
     assert log_dir.name == "config=abc123def456"
+
+
+def test_blockworld_runtime_options_support_a_one_case_cpu_smoke(
+    monkeypatch,
+):
+    module = _load_evaluate_entrypoint(monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(EVALUATE_PATH),
+            "--algorithm",
+            "planu",
+            "--version",
+            "2",
+            "--steps",
+            "2",
+            "--model",
+            "hf-internal-testing/tiny-random-LlamaForCausalLM",
+            "--device",
+            "cpu",
+            "--max-examples",
+            "1",
+            "--output-dir",
+            "/tmp/planu-blockworld-smoke",
+        ],
+    )
+
+    args = module.parse_args()
+
+    assert args.gpu is None
+    assert args.model == (
+        "hf-internal-testing/tiny-random-LlamaForCausalLM"
+    )
+    assert args.device == "cpu"
+    assert args.max_examples == 1
+    assert args.output_dir == "/tmp/planu-blockworld-smoke"
+    assert module.resolve_device("cpu", cuda_available=False) == "cpu"
+    assert module.resolve_device("auto", cuda_available=False) == "cpu"
+    assert module.resolve_device("auto", cuda_available=True) == "cuda"
+    with pytest.raises(ValueError, match="CUDA"):
+        module.resolve_device("cuda", cuda_available=False)
+
+    model = types.SimpleNamespace(
+        model=types.SimpleNamespace(
+            hf_device_map={"model": 0, "lm_head": "cpu"},
+        )
+    )
+    placement = module._model_placement_metadata(
+        model,
+        requested_device="auto",
+        resolved_device="cuda",
+        cuda_visible_devices="2,3",
+        cuda_device_names=["GPU A", "GPU B"],
+    )
+    assert placement == {
+        "requested_device": "auto",
+        "resolved_device": "cuda",
+        "hf_device_map": {"lm_head": "cpu", "model": "0"},
+        "cuda_visible_devices": "2,3",
+        "cuda_device_names": ["GPU A", "GPU B"],
+    }
+
+
+def test_blockworld_entrypoint_resolves_assets_and_limits_dataset():
+    source = EVALUATE_PATH.read_text(encoding="utf-8")
+
+    assert "BLOCKWORLD_ROOT / prompt_path" in source
+    assert "BLOCKWORLD_ROOT / data_path" in source
+    assert "BLOCKWORLD_ROOT / \"examples/CoT/blocksworld/data/bw_config.yaml\"" in source
+    assert "BLOCKWORLD_ROOT / \"examples/CoT/blocksworld/data/generated_domain.pddl\"" in source
+    assert "evaluator.full_dataset = evaluator.full_dataset[:args.max_examples]" in source
 
 
 def test_evaluate_writes_json_provenance_before_calling_evaluator():

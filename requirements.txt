@@ -1,3 +1,5 @@
+# Legacy upstream dependency list. Use requirements-experiments.txt for the
+# tested phase-one Overcooked, VirtualHome, and BlockWorld runtime.
 accelerate
 appdirs
 bitsandbytes==0.38.1

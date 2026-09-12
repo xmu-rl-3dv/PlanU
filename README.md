@@ -91,15 +91,21 @@ in editable mode:
 ```bash
 python3.9 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pip install easydict DI-engine
-python -m pip install -e .
-python -m pip install -e gym-macro-overcooked
-python -m pip install -e virtual-home
+python -m pip install -r requirements-experiments.txt -c requirements-experiments-lock.txt
+python -m pip install --no-deps -e .
+python -m pip install --no-deps -e gym-macro-overcooked
+python -m pip install --no-deps -e virtual-home
+git clone https://github.com/karthikv792/LLMs-Planning.git external/LLMs-Planning
+git -C external/LLMs-Planning checkout 34e6841
+export PLANBENCH_PATH="$PWD/external/LLMs-Planning"
 ```
 
-The Overcooked example script enables RND, so DI-engine and easydict are required
-runtime dependencies.
+`requirements-experiments.txt` pins the Python runtime exercised by the
+phase-one smoke suite, including the Gym/NumPy/DI-engine/Werkzeug combination
+and `easydict` needed by RND.
+`requirements-experiments-lock.txt` freezes the complete resolved dependency
+set from that Python 3.9 smoke environment. The editable installs use
+`--no-deps` so the benchmark packages cannot silently replace those pins.
 
 The benchmark environments remain in `gym-macro-overcooked` and
 `virtual-home`; `planu_core` does not vendor or replace them. BlockWorld
@@ -109,10 +115,10 @@ are external benchmark data and are not included in the Python distribution.
 ## Configuration Scope
 
 Overcooked and VirtualHome model and device choices use runner arguments or
-environment variables. BlockWorld exposes GPU, seed, iterations, and success
-probability settings, but its current HF model identifier remains in
-`blockworld/evaluate_stochastic.py`; changing that identifier requires a source
-edit.
+environment variables. BlockWorld exposes GPU, seed, iterations, success
+probability, `--model`, `--device`, and `--max-examples` through
+`blockworld/evaluate_stochastic.py`, so the HF model identifier and smoke budget
+can be changed without editing hardcoded source locations.
 
 ## Run Overcooked
 
@@ -134,6 +140,16 @@ through the [VirtualHome adapter](planu_core/adapters/virtualhome.py) and
 [BlockWorld adapter](planu_core/adapters/blockworld.py), respectively, with the
 same shared PlanU core. WebShop and TravelPlanner remain phase-two plans and do
 not have unified-core execution instructions yet.
+
+The executable smoke suite is `scripts/smoke_phase_one.sh`. It runs the real
+Overcooked, VirtualHome food, VirtualHome entertainment, and BlockWorld
+pipelines with one trajectory/example and a tiny public Llama checkpoint. This
+validates environment, scorer, RND, search, backup, evaluator, and persistence
+integration; it is not a paper-metric configuration.
+
+The complete paper/reference configuration matrix, smoke coverage, parity
+gates, and intentional non-bit-identical differences are documented in
+[Phase-One Experiment Validation](docs/experiment-validation.md).
 
 ## Outputs And Provenance
 
