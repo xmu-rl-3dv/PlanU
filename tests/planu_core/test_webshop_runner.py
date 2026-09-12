@@ -42,6 +42,225 @@ def script_environment(bin_dir, **values):
     return environment
 
 
+def write_smoke_runner_fake(path):
+    write_executable(
+        path,
+        r"""
+if [[ "${1:-}" == "-" ]]; then
+  exec "$FAKE_REAL_PYTHON" "$@"
+fi
+printf 'python %s\n' "$*" >> "$FAKE_COMMAND_LOG"
+output_dir=''
+while (($#)); do
+  if [[ "$1" == "--output-dir" ]]; then
+    output_dir="$2"
+    break
+  fi
+  shift
+done
+"$FAKE_REAL_PYTHON" - \
+  "$output_dir" "$FAKE_SERVER_URL" "$FAKE_PLANU_HEAD" \
+  "${FAKE_ARTIFACT_MODE:-valid}" <<'PY'
+import copy
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+output_dir = Path(sys.argv[1])
+server_url = sys.argv[2]
+planu_head = sys.argv[3]
+mode = sys.argv[4]
+output_dir.mkdir(parents=True, exist_ok=True)
+(output_dir / "tasks").mkdir()
+
+if mode == "minimal":
+    effective = {
+        "args": {
+            "depth": 10,
+            "iterations": 1,
+            "smoke": True,
+            "task_end_index": 2,
+            "task_start_index": 1,
+        }
+    }
+    metadata = {
+        "model_id": "scripted",
+        "server_url": server_url,
+        "webshop_commit": (
+            "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+        ),
+    }
+    task = {
+        "task_id": "fixed_1",
+        "task_index": 1,
+        "trajectory": [
+            {"action": "search[product]"},
+            {"action": "click[A1]"},
+            {"action": "click[Buy Now]"},
+        ],
+        "search_iterations": 1,
+        "max_depth": 10,
+        "provenance": metadata,
+    }
+else:
+    args = {
+        "backend": "qwen-plus",
+        "base_url": (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ),
+        "depth": 10,
+        "iterations": 1,
+        "n_evaluate_sample": 1,
+        "n_generate_sample": 5,
+        "output_dir": str(output_dir),
+        "prompt_mode": "cot",
+        "request_timeout": 30.0,
+        "seed": 0,
+        "smoke": True,
+        "smoke_search_query": "product",
+        "task_end_index": 2,
+        "task_start_index": 1,
+        "temperature": 0.8,
+        "webshop_url": server_url,
+    }
+    planu_config = {
+        "categorical_initialization": False,
+        "categorical_levels": [0.1, 0.3, 0.5, 0.7, 0.9],
+        "curiosity_weight": 0.0,
+        "debug_state_keys": False,
+        "discount": 1.0,
+        "include_preview_reward": True,
+        "max_depth": 10,
+        "max_iterations": 1,
+        "n_quantiles": 51,
+        "quantile_learning_rate": 0.9,
+        "risk_distortion": 0.0,
+        "selection_schedule": {
+            "always_sample_before": 0,
+            "probabilistic_sample_before": 0,
+            "sample_probability": 0.0,
+        },
+        "selection_temperature": 1.0,
+        "train_curiosity": True,
+        "value_max": 1.0,
+        "value_min": 0.0,
+    }
+    effective = {"args": args, "planu_config": planu_config}
+    config_hash = hashlib.sha256(
+        json.dumps(
+            effective,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    metadata = {
+        "config_hash": config_hash,
+        "git_commit": planu_head,
+        "model_id": "scripted",
+        "packages": {
+            name: "test-version"
+            for name in (
+                "beautifulsoup4",
+                "ding",
+                "gym",
+                "numpy",
+                "openai",
+                "peft",
+                "requests",
+                "torch",
+                "transformers",
+            )
+        },
+        "planu_git_commit": planu_head,
+        "python_version": "3.9.6",
+        "seed": 0,
+        "server_url": server_url,
+        "task_bounds": {"end_exclusive": 2, "start": 1},
+        "webshop_commit": (
+            "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+        ),
+    }
+    trajectory = [
+        {
+            "action": "search[product]",
+            "observation": "Search results for a mockingbird product",
+            "reward": 0.0,
+        },
+        {
+            "action": "click[A1]",
+            "observation": "Product detail with Buy Now",
+            "reward": 0.0,
+        },
+        {
+            "action": "click[Buy Now]",
+            "observation": "Your score (min 0.0, max 1.0): 0.5",
+            "reward": 0.5,
+        },
+    ]
+    task = {
+        "best_terminal_reward": 0.5,
+        "error_status": None,
+        "latency_failure_count": 0,
+        "max_depth": 10,
+        "provenance": metadata,
+        "search_iterations": 1,
+        "success": False,
+        "task_id": "fixed_1",
+        "task_index": 1,
+        "token_usage": {
+            "completion_tokens": 0,
+            "prompt_tokens": 0,
+            "total_tokens": 0,
+        },
+        "trajectory": trajectory,
+    }
+    if mode == "wrong_webshop_commit":
+        metadata["webshop_commit"] = "wrong"
+    elif mode == "empty_planu_commit":
+        metadata["git_commit"] = ""
+        metadata["planu_git_commit"] = ""
+    elif mode == "wrong_model":
+        metadata["model_id"] = "fake-scripted"
+    elif mode == "wrong_server":
+        metadata["server_url"] = "https://different.example"
+    elif mode == "wrong_task":
+        task["task_id"] = "fixed_2"
+    elif mode == "zero_iterations":
+        task["search_iterations"] = 0
+    elif mode == "empty_trajectory":
+        task["trajectory"] = []
+    elif mode == "missing_observation":
+        del task["trajectory"][0]["observation"]
+    elif mode == "reward_mismatch":
+        task["best_terminal_reward"] = 0.25
+
+manifest = {
+    "effective_config": effective,
+    "run_metadata": metadata,
+}
+result_task = copy.deepcopy(task)
+if mode == "results_mismatch":
+    result_task["task_index"] = 2
+for name, payload in (
+    ("run_manifest.json", manifest),
+    ("effective_config.json", effective),
+    ("run_metadata.json", metadata),
+    ("tasks/fixed_1.json", task),
+):
+    (output_dir / name).write_text(
+        json.dumps(payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+(output_dir / "results.jsonl").write_text(
+    json.dumps(result_task, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+""",
+    )
+
+
 class Closeable:
     def __init__(self):
         self.closed = False
@@ -1565,6 +1784,155 @@ esac
     assert sentinel.read_text(encoding="utf-8") == "keep\n"
 
 
+def test_webshop_bootstrap_rejects_empty_lucene_index(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    (webshop_root / "data").mkdir()
+    (webshop_root / "data" / "items_shuffle_1000.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (webshop_root / "data" / "items_ins_v2_1000.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (webshop_root / "data" / "items_human_ins.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    resources = webshop_root / "search_engine" / "resources"
+    resources.mkdir(parents=True)
+    (resources / "documents.jsonl").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (webshop_root / "search_engine" / "indexes").mkdir(parents=True)
+    env_prefix = webshop_root / ".conda-planu"
+    (env_prefix / "bin").mkdir(parents=True)
+    write_executable(
+        env_prefix / "bin" / "python",
+        """
+if [[ "$*" == *"platform.python_version"* ]]; then
+  printf '3.8.13\n'
+fi
+""",
+    )
+    (env_prefix / (
+        ".planu-webshop-small-"
+        "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+    )).touch()
+    write_executable(
+        fake_bin / "git",
+        """
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*) ;;
+  *"cat-file -e"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"symbolic-ref -q HEAD"*) exit 1 ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            WEBSHOP_ROOT=str(webshop_root),
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "index" in completed.stderr.lower()
+
+
+def test_webshop_bootstrap_canonicalizes_relative_root_and_custom_env(
+    tmp_path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    for relative_path in (
+        "data/items_shuffle_1000.json",
+        "data/items_ins_v2_1000.json",
+        "data/items_human_ins.json",
+        "search_engine/resources/documents.jsonl",
+        "search_engine/indexes/segments_1",
+        "search_engine/indexes/_0.si",
+    ):
+        path = webshop_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("nonempty\n", encoding="utf-8")
+    env_prefix = webshop_root / "custom-env"
+    (env_prefix / "bin").mkdir(parents=True)
+    write_executable(
+        env_prefix / "bin" / "python",
+        """
+if [[ "$*" == *"platform.python_version"* ]]; then
+  printf '3.8.13\n'
+fi
+""",
+    )
+    (env_prefix / (
+        ".planu-webshop-small-"
+        "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+    )).touch()
+    git_log = tmp_path / "git.log"
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*)
+    if [[ "$*" != *":(exclude)custom-env"* ]]; then
+      printf '?? custom-env/\n'
+    fi
+    ;;
+  *"cat-file -e"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"symbolic-ref -q HEAD"*) exit 1 ;;
+esac
+""",
+    )
+    write_executable(fake_bin / "conda", "exit 0\n")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_GIT_LOG=str(git_log),
+            WEBSHOP_ENV_PREFIX="WebShop/custom-env",
+            WEBSHOP_ROOT="WebShop",
+        ),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert str(webshop_root.resolve()) in completed.stdout
+    assert ":(exclude)custom-env" in git_log.read_text(encoding="utf-8")
+
+
 def test_webshop_bootstrap_is_idempotent_after_verified_small_setup(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -1577,8 +1945,13 @@ def test_webshop_bootstrap_is_idempotent_after_verified_small_setup(tmp_path):
         setup_script,
         """
 printf 'setup %s\n' "$*" >> "$FAKE_SETUP_LOG"
-mkdir -p data search_engine/indexes
-touch data/items_shuffle_1000.json data/items_ins_v2_1000.json
+mkdir -p data search_engine/resources search_engine/indexes
+printf '{}\n' > data/items_shuffle_1000.json
+printf '{}\n' > data/items_ins_v2_1000.json
+printf '{}\n' > data/items_human_ins.json
+printf '{}\n' > search_engine/resources/documents.jsonl
+printf 'segments\n' > search_engine/indexes/segments_1
+printf 'segment info\n' > search_engine/indexes/_0.si
 """,
     )
     write_executable(
@@ -1615,6 +1988,14 @@ if [[ "${1:-}" == "create" ]]; then
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *"import web_agent_site.app"* ]]; then
+  exit 0
+elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
+  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+  trap 'exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
 fi
 EOF
   chmod +x "$prefix/bin/python"
@@ -1623,9 +2004,25 @@ elif [[ "${1:-}" == "run" ]]; then
 fi
 """,
     )
+    curl_count = tmp_path / "curl-count"
+    write_executable(
+        fake_bin / "curl",
+        """
+count=0
+if [[ -f "$FAKE_CURL_COUNT" ]]; then
+  count="$(cat "$FAKE_CURL_COUNT")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
+((count > 1))
+""",
+    )
+    server_pid_log = tmp_path / "server.pid"
     environment = script_environment(
         fake_bin,
         FAKE_CONDA_LOG=str(conda_log),
+        FAKE_CURL_COUNT=str(curl_count),
+        FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SETUP_LOG=str(setup_log),
         WEBSHOP_ROOT=str(webshop_root),
     )
@@ -1653,64 +2050,30 @@ fi
     assert setup_log.read_text(encoding="utf-8").splitlines() == [
         "setup -d small"
     ]
+    server_pid = int(server_pid_log.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(server_pid, 0)
 
 
 def test_webshop_smoke_uses_reachable_server_and_verifies_artifacts(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    webshop_root = tmp_path / "WebShop"
-    (webshop_root / ".git").mkdir(parents=True)
     run_root = tmp_path / "run"
     command_log = tmp_path / "commands.log"
-    write_executable(
-        fake_bin / "git",
-        """
-case "$*" in
-  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
-  *"remote get-url origin"*)
-    printf 'https://github.com/princeton-nlp/WebShop.git\n'
-    ;;
-  *"status --porcelain"*) ;;
-  *"rev-parse HEAD"*)
-    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
-    ;;
-esac
-""",
-    )
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
     write_executable(
         fake_bin / "curl",
         'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
     )
-    write_executable(
-        fake_bin / "planu-python",
-        """
-if [[ "${1:-}" == "-" ]]; then
-  exec "$FAKE_REAL_PYTHON" "$@"
-fi
-printf 'python %s\n' "$*" >> "$FAKE_COMMAND_LOG"
-output_dir=''
-while (($#)); do
-  if [[ "$1" == "--output-dir" ]]; then
-    output_dir="$2"
-    break
-  fi
-  shift
-done
-mkdir -p "$output_dir/tasks"
-metadata='{"model_id":"scripted","server_url":"https://shop.example","webshop_commit":"64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"}'
-effective='{"args":{"depth":10,"iterations":1,"smoke":true,"task_end_index":2,"task_start_index":1}}'
-task='{"task_id":"fixed_1","task_index":1,"trajectory":[{"action":"search[product]"},{"action":"click[A1]"},{"action":"click[Buy Now]"}],"search_iterations":1,"max_depth":10,"provenance":'"$metadata"'}'
-printf '{"effective_config":%s,"run_metadata":%s}\n' \
-  "$effective" "$metadata" > "$output_dir/run_manifest.json"
-printf '%s\n' "$effective" > "$output_dir/effective_config.json"
-printf '%s\n' "$metadata" > "$output_dir/run_metadata.json"
-printf '%s\n' "$task" > "$output_dir/tasks/fixed_1.json"
-printf '%s\n' "$task" > "$output_dir/results.jsonl"
-""",
-    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
 
     completed = subprocess.run(
         ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
@@ -1718,15 +2081,20 @@ printf '%s\n' "$task" > "$output_dir/results.jsonl"
             fake_bin,
             FAKE_COMMAND_LOG=str(command_log),
             FAKE_REAL_PYTHON=sys.executable,
-            PLANU_PYTHON=str(fake_bin / "planu-python"),
-            RUN_ROOT=str(run_root),
-            WEBSHOP_ROOT=str(webshop_root),
+            FAKE_PLANU_HEAD=planu_head,
+            FAKE_SERVER_URL="https://shop.example",
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_ROOT="missing-webshop-checkout",
+            WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
             WEBSHOP_URL="https://shop.example",
         ),
     )
 
     commands = command_log.read_text(encoding="utf-8")
     assert completed.returncode == 0, completed.stderr
+    assert run_root.is_dir()
+    assert not (tmp_path / "missing-webshop-checkout").exists()
     assert "https://shop.example/fixed_1" in commands
     assert "--smoke" in commands
     assert "--iterations 1" in commands
@@ -1734,3 +2102,271 @@ printf '%s\n' "$task" > "$output_dir/results.jsonl"
     assert "--task-start-index 1 --task-end-index 2" in commands
     assert '"http_transition_count": 3' in completed.stdout
     assert '"quantile_backup_count": 1' in completed.stdout
+
+
+def test_webshop_smoke_starts_only_pinned_local_checkout_and_kills_own_pid(
+    tmp_path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    env_prefix = webshop_root / "custom-env"
+    (env_prefix / "bin").mkdir(parents=True)
+    server_pid_log = tmp_path / "server.pid"
+    write_executable(
+        env_prefix / "bin" / "python",
+        """
+printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+trap 'exit 0' TERM INT
+while true; do
+  sleep 1
+done
+""",
+    )
+    command_log = tmp_path / "commands.log"
+    curl_count = tmp_path / "curl-count"
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    write_executable(
+        fake_bin / "git",
+        """
+printf '%s\n' "$*" >> "$FAKE_COMMAND_LOG"
+case "$*" in
+  *"$FAKE_PROJECT_ROOT rev-parse HEAD"*) printf '%s\n' "$FAKE_PLANU_HEAD" ;;
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"status --porcelain"*)
+    if [[ "$*" != *":(exclude)custom-env"* ]]; then
+      printf '?? custom-env/\n'
+    fi
+    ;;
+esac
+""",
+    )
+    write_executable(
+        fake_bin / "curl",
+        """
+printf 'curl %s\n' "$*" >> "$FAKE_COMMAND_LOG"
+count=0
+if [[ -f "$FAKE_CURL_COUNT" ]]; then
+  count="$(cat "$FAKE_CURL_COUNT")"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$FAKE_CURL_COUNT"
+((count > 1))
+""",
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_CURL_COUNT=str(curl_count),
+            FAKE_PLANU_HEAD=planu_head,
+            FAKE_PROJECT_ROOT=str(ROOT),
+            FAKE_REAL_PYTHON=sys.executable,
+            FAKE_SERVER_PID_LOG=str(server_pid_log),
+            FAKE_SERVER_URL="http://127.0.0.1:3000",
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_ENV_PREFIX="WebShop/custom-env",
+            WEBSHOP_ROOT="WebShop",
+        ),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    commands = command_log.read_text(encoding="utf-8")
+    assert ":(exclude)custom-env" in commands
+    assert server_pid_log.is_file()
+    server_pid = int(server_pid_log.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(server_pid, 0)
+
+
+def test_webshop_smoke_requires_external_server_commit_provenance(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    write_executable(
+        fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_REAL_PYTHON=sys.executable,
+            FAKE_PLANU_HEAD=planu_head,
+            FAKE_SERVER_URL="https://shop.example",
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_ROOT="missing-webshop-checkout",
+            WEBSHOP_URL="https://shop.example",
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "WEBSHOP_SERVER_COMMIT" in completed.stderr
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+def test_webshop_smoke_rejects_wrong_external_server_commit(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    write_executable(
+        fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_REAL_PYTHON=sys.executable,
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_SERVER_COMMIT="wrong",
+            WEBSHOP_URL="https://shop.example",
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "must equal pinned commit" in completed.stderr
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+def test_webshop_smoke_rejects_fabricated_minimal_artifacts(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    write_executable(
+        fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_ARTIFACT_MODE="minimal",
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_REAL_PYTHON=sys.executable,
+            FAKE_PLANU_HEAD=planu_head,
+            FAKE_SERVER_URL="https://shop.example",
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_ROOT="missing-webshop-checkout",
+            WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
+            WEBSHOP_URL="https://shop.example",
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert "keys mismatch" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "message"),
+    [
+        ("wrong_webshop_commit", "pinned WebShop commit"),
+        ("empty_planu_commit", "checkout HEAD"),
+        ("wrong_model", "scripted model policy"),
+        ("wrong_server", "configured URL"),
+        ("wrong_task", "fixed_1"),
+        ("zero_iterations", "at least one backup"),
+        ("empty_trajectory", "real HTTP trajectory"),
+        ("missing_observation", "keys mismatch"),
+        ("reward_mismatch", "terminal reward"),
+        ("results_mismatch", "consolidated results"),
+    ],
+)
+def test_webshop_smoke_rejects_tampered_authoritative_artifacts(
+    tmp_path,
+    mode,
+    message,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "commands.log"
+    planu_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    write_executable(
+        fake_bin / "curl",
+        'printf "curl %s\\n" "$*" >> "$FAKE_COMMAND_LOG"\n',
+    )
+    write_smoke_runner_fake(fake_bin / "planu-python")
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=script_environment(
+            fake_bin,
+            FAKE_ARTIFACT_MODE=mode,
+            FAKE_COMMAND_LOG=str(command_log),
+            FAKE_REAL_PYTHON=sys.executable,
+            FAKE_PLANU_HEAD=planu_head,
+            FAKE_SERVER_URL="https://shop.example",
+            PLANU_PYTHON="bin/planu-python",
+            RUN_ROOT="run",
+            WEBSHOP_ROOT="missing-webshop-checkout",
+            WEBSHOP_SERVER_COMMIT=WEBSHOP_COMMIT,
+            WEBSHOP_URL="https://shop.example",
+        ),
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr

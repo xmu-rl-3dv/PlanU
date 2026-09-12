@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_URL="https://github.com/princeton-nlp/WebShop.git"
 COMMIT="64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
-ROOT="${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}"
-ENV_PREFIX="${WEBSHOP_ENV_PREFIX:-${ROOT}/.conda-planu}"
-SETUP_MARKER="${ENV_PREFIX}/.planu-webshop-small-${COMMIT}"
+START_ATTEMPTS="${WEBSHOP_BOOTSTRAP_START_ATTEMPTS:-120}"
+SERVER_PID=""
 
 fail() {
   printf 'WebShop bootstrap error: %s\n' "$*" >&2
@@ -17,6 +14,15 @@ fail() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 ||
     fail "required command '$1' is missing"
+}
+
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(os.path.abspath(sys.argv[1])))
+PY
 }
 
 is_official_remote() {
@@ -33,11 +39,29 @@ is_official_remote() {
   esac
 }
 
+cleanup() {
+  if [[ -n "${SERVER_PID}" ]]; then
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" 2>/dev/null || true
+    fi
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+  SERVER_PID=""
+}
+
 verify_clean_checkout() {
+  local -a pathspecs
+  local env_relative
   local status
+
+  pathspecs=(.)
+  if [[ "${ENV_PREFIX}" == "${ROOT}/"* ]]; then
+    env_relative="${ENV_PREFIX#"${ROOT}/"}"
+    pathspecs+=(":(exclude)${env_relative}")
+  fi
   status="$(
     git -C "${ROOT}" status --porcelain --untracked-files=normal \
-      -- . ':(exclude).conda-planu'
+      -- "${pathspecs[@]}"
   )" ||
     fail "could not inspect the WebShop working tree"
   [[ -z "${status}" ]] ||
@@ -53,18 +77,89 @@ verify_environment() {
 }
 
 verify_small_setup() {
-  [[ -f "${ROOT}/data/items_shuffle_1000.json" ]] || return 1
-  [[ -f "${ROOT}/data/items_ins_v2_1000.json" ]] || return 1
-  [[ -d "${ROOT}/search_engine/indexes" ]] || return 1
+  local index_dir="${ROOT}/search_engine/indexes"
+  local -a segment_files
+  local -a segment_info_files
+
+  # These are the data, resource, and runtime index paths used by the pin.
+  [[ -s "${ROOT}/data/items_shuffle_1000.json" ]] || return 1
+  [[ -s "${ROOT}/data/items_ins_v2_1000.json" ]] || return 1
+  [[ -s "${ROOT}/data/items_human_ins.json" ]] || return 1
+  [[ -s "${ROOT}/search_engine/resources/documents.jsonl" ]] || return 1
+  [[ -d "${index_dir}" ]] || return 1
+  shopt -s nullglob
+  segment_files=("${index_dir}"/segments_*)
+  segment_info_files=("${index_dir}"/_*.si)
+  shopt -u nullglob
+  ((${#segment_files[@]} > 0)) || return 1
+  ((${#segment_info_files[@]} > 0)) || return 1
+  [[ -s "${segment_files[0]}" ]] || return 1
+  [[ -s "${segment_info_files[0]}" ]] || return 1
   (
     cd "${ROOT}"
     "${ENV_PREFIX}/bin/python" -c "import web_agent_site.app"
   ) >/dev/null 2>&1
 }
 
+server_reachable() {
+  curl --fail --silent \
+    --connect-timeout 2 --max-time 5 \
+    "http://127.0.0.1:3000/fixed_1" >/dev/null
+}
+
+verify_server_startup() {
+  local attempt=0
+  local log_path="${ENV_PREFIX}/bootstrap-server.log"
+
+  if server_reachable; then
+    fail "port 3000 is already serving a process not started by this bootstrap"
+  fi
+  (
+    cd "${ROOT}"
+    exec "${ENV_PREFIX}/bin/python" -m web_agent_site.app
+  ) >"${log_path}" 2>&1 &
+  SERVER_PID=$!
+
+  until server_reachable; do
+    attempt=$((attempt + 1))
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+      wait "${SERVER_PID}" 2>/dev/null || true
+      SERVER_PID=""
+      fail "pinned WebShop server exited during validation; see ${log_path}"
+    fi
+    if ((attempt >= START_ATTEMPTS)); then
+      fail "pinned WebShop server did not become ready after ${START_ATTEMPTS} attempts"
+    fi
+    sleep 1
+  done
+  kill -0 "${SERVER_PID}" 2>/dev/null ||
+    fail "pinned WebShop server exited after its health check"
+  cleanup
+}
+
+require_command python3
 require_command git
 require_command conda
+require_command curl
 CONDA_EXE="$(command -v conda)"
+SCRIPT_PATH="$(canonical_path "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+PROJECT_ROOT="${SCRIPT_DIR%/*}"
+ROOT="$(canonical_path "${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}")"
+ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX:-${ROOT}/.conda-planu}")"
+SETUP_MARKER="${ENV_PREFIX}/.planu-webshop-small-${COMMIT}"
+
+case "${START_ATTEMPTS}" in
+  "" | *[!0-9]*) fail "WEBSHOP_BOOTSTRAP_START_ATTEMPTS must be a positive integer" ;;
+esac
+((START_ATTEMPTS > 0)) ||
+  fail "WEBSHOP_BOOTSTRAP_START_ATTEMPTS must be a positive integer"
+[[ "${ENV_PREFIX}" != "${ROOT}" ]] ||
+  fail "WEBSHOP_ENV_PREFIX must not equal WEBSHOP_ROOT"
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -e "${ROOT}" ]]; then
   mkdir -p "$(dirname "${ROOT}")"
@@ -115,8 +210,9 @@ verify_environment ||
 
 if [[ -f "${SETUP_MARKER}" ]]; then
   verify_small_setup ||
-    fail "setup marker exists but the pinned small WebShop setup is incomplete"
+    fail "setup marker exists but required data or Lucene index artifacts are incomplete"
 elif verify_small_setup; then
+  verify_server_startup
   touch "${SETUP_MARKER}"
 else
   (
@@ -127,7 +223,8 @@ else
       bash ./setup.sh -d small
   ) || fail "upstream small setup failed; check network access and its log output"
   verify_small_setup ||
-    fail "upstream small setup finished without the required data, index, or server module"
+    fail "upstream small setup finished without required data, Lucene index artifacts, or server module"
+  verify_server_startup
   touch "${SETUP_MARKER}"
 fi
 
