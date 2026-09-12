@@ -59,6 +59,15 @@ class TransitionResult:
     info: Mapping[str, Any] = field(default_factory=dict)
 
 
+class ActionProvider(Protocol):
+    def actions(
+        self,
+        state: EnvironmentState,
+        state_visit_count: int = 0,
+    ) -> Sequence[ActionCandidate]:
+        ...
+
+
 class EnvironmentAdapter(Protocol):
     def reset(self, seed: Optional[int] = None) -> EnvironmentState:
         ...

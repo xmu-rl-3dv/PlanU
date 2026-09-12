@@ -12,6 +12,7 @@ from .config import PlanUConfig
 from .curiosity import NullCuriosity
 from .distribution import QuantileDistribution
 from .interfaces import (
+    ActionProvider,
     ActionScorer,
     CuriosityProvider,
     EnvironmentAdapter,
@@ -137,11 +138,13 @@ class PlanUSearch:
         scorer: ActionScorer,
         config: PlanUConfig,
         curiosity: Optional[CuriosityProvider] = None,
+        action_provider: Optional[ActionProvider] = None,
     ):
         self.adapter = adapter
         self.scorer = scorer
         self.config = config
         self.curiosity = NullCuriosity() if curiosity is None else curiosity
+        self.action_provider = action_provider
         self.root: Optional[LanguageNode] = None
 
     def _normalize_completion(
@@ -230,7 +233,12 @@ class PlanUSearch:
         if node.terminated or node.truncated or node.children:
             return
 
-        candidates = list(self.adapter.actions(state, node.visit_count))
+        if self.action_provider is None:
+            candidates = list(self.adapter.actions(state, node.visit_count))
+        else:
+            candidates = list(
+                self.action_provider.actions(state, node.visit_count)
+            )
         if not candidates:
             return
         action_keys = [candidate.key for candidate in candidates]

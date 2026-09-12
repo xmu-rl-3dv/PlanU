@@ -15,6 +15,7 @@ from .curiosity import NullCuriosity, RndCuriosity
 from .distribution import QuantileDistribution
 from .interfaces import (
     ActionCandidate,
+    ActionProvider,
     ActionScorer,
     CuriosityProvider,
     DistributionScorer,
@@ -30,6 +31,7 @@ from .selection import select_action
 __all__ = [
     "ActionCandidate",
     "ActionNode",
+    "ActionProvider",
     "ActionScorer",
     "BlockWorldAdapter",
     "BlockWorldScorer",
