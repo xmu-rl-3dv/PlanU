@@ -1,8 +1,11 @@
+import ast
+import hashlib
 import math
 import sys
 import types
 from dataclasses import FrozenInstanceError
 from inspect import signature
+from pathlib import Path
 from typing import get_type_hints
 
 import pytest
@@ -20,10 +23,14 @@ from planu_core.webshop import (
 )
 from planu_core.webshop.actions import WebShopAction
 from planu_core.webshop.providers import (
+    LEGACY_COT_PROMPT,
+    LEGACY_VALUE_PROMPT,
     ModelWebShopActionProvider,
     ModelWebShopActionScorer,
     ScriptedWebShopActionProvider,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class FakeBackend:
@@ -83,6 +90,51 @@ def candidate(text, trajectory=None):
     if trajectory is not None:
         metadata["trajectory"] = trajectory
     return ActionCandidate(action.key, action, action.render(), metadata)
+
+
+def legacy_prompt_source(name):
+    source = (ROOT / "webshop" / "prompt.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    for node in module.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("legacy prompt {!r} was not found".format(name))
+
+
+def sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_cot_prompt_is_byte_exact_legacy_prompt2():
+    legacy = legacy_prompt_source("prompt2")
+    trajectory = "Webshop\nInstruction:\nfind {one} item\n[Search]"
+
+    assert sha256(legacy) == (
+        "5cc7e1f4b72973b27e1579b4706ce7292b01dc13cd4f12638715f35b6b8ee510"
+    )
+    assert LEGACY_COT_PROMPT == legacy
+    assert LEGACY_COT_PROMPT.format(input=trajectory) == legacy.format(
+        input=trajectory
+    )
+
+
+def test_value_prompt_is_byte_exact_legacy_score_prompt():
+    legacy = legacy_prompt_source("score_prompt")
+    evaluation = "Webshop\nInstruction:\nfind {one} item\n\nReflection: "
+
+    assert sha256(legacy) == (
+        "94b7184c580857bb3682c6f8d4f181601cff76d24a01d025c52a2f4183d93145"
+    )
+    assert LEGACY_VALUE_PROMPT == legacy
+    assert LEGACY_VALUE_PROMPT.format(s="", input=evaluation) == legacy.format(
+        s="",
+        input=evaluation,
+    )
 
 
 def test_generation_result_and_backend_protocol_contract():

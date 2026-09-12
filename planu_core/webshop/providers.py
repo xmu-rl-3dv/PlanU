@@ -7,20 +7,20 @@ from planu_core.text_backend import GenerationResult, TextBackend
 from planu_core.webshop.actions import WebShopAction, parse_action
 
 
-LEGACY_COT_PROMPT = """You are interacting with a Webshop environment.
-Your goal: Follow the given **user instruction** to find and purchase the correct item.
+LEGACY_COT_PROMPT = """You are interacting with a Webshop environment.  
+Your goal: Follow the given **user instruction** to find and purchase the correct item.  
 
-Rules of interaction:
-1. You will see a simulated webpage with buttons in [square brackets].
-2. To interact, always output exactly one action in the format:
-   - `click[button name]` → to select an option or buy the product.
-   - `search[keywords]` → to perform a new search.
-3. Only output the action name, nothing else.
-4. You must only click [Buy Now] **after confirming that the selected item fully satisfies all requirements in the user instruction** (e.g., size, scent, skin type, price limit).
+Rules of interaction:  
+1. You will see a simulated webpage with buttons in [square brackets].  
+2. To interact, always output exactly one action in the format:  
+   - `click[button name]` → to select an option or buy the product.  
+   - `search[keywords]` → to perform a new search.  
+3. Only output the action name, nothing else.  
+4. You must only click [Buy Now] **after confirming that the selected item fully satisfies all requirements in the user instruction** (e.g., size, scent, skin type, price limit).  
 
-Context:
-The current web page description is: {input}
-[] means a button you can click. You can select size, scent, pack, etc., by clicking the button.
+Context:  
+The current web page description is: {input}  
+[] means a button you can click. You can select size, scent, pack, etc., by clicking the button.  
 
 Your next action is:
 """
@@ -80,25 +80,25 @@ Action: click[Buy Now]
 Reflection: In this attempt, I was unsuccessful. I accidentally bought a product that was $100, which is more than my budget of $30. Either way, the initial search results were not good. Next time, I will do search["variety pack of chips"] and then check if the results meet the dairy free and the $30 budget constraints. I will continue to refine my searches so that I can find more products.
 Thus the correctness score is 5
 
-Webshop
-Instruction:
-i would like a 3 ounce bottle of bright citrus deodorant for sensitive skin, and price lower than 50.00 dollars
-[Search]
+Webshop 
+Instruction:  
+i would like a 3 ounce bottle of bright citrus deodorant for sensitive skin, and price lower than 50.00 dollars 
+[Search]  
 
 Action: search[3 ounce bright citrus deodorant sensitive skin]
-Observation:
-[Back to Search]
-Page 1 (Total results: 50)
-[Next >]
-[B078GWRC1J]
-Bright Citrus Deodorant by Earth Mama | Natural and Safe for Sensitive Skin, Pregnancy and Breastfeeding, Contains Organic Calendula 3-Ounce
-$10.99
-[B078GTKVXY]
-Ginger Fresh Deodorant by Earth Mama | Natural and Safe for Sensitive Skin, Pregnancy and Breastfeeding, Contains Organic Calendula 3-Ounce
-$10.99
-[B08KBVJ4XN]
-Barrel and Oak - Aluminum-Free Deodorant, Deodorant for Men, Essential Oil-Based Scent, 24-Hour Odor Protection, Cedar & Patchouli Blend, Gentle on Sensitive Skin (Mountain Sage, 2.7 oz, 2-Pack)
-$15.95
+Observation: 
+[Back to Search] 
+Page 1 (Total results: 50) 
+[Next >] 
+[B078GWRC1J] 
+Bright Citrus Deodorant by Earth Mama | Natural and Safe for Sensitive Skin, Pregnancy and Breastfeeding, Contains Organic Calendula 3-Ounce 
+$10.99 
+[B078GTKVXY] 
+Ginger Fresh Deodorant by Earth Mama | Natural and Safe for Sensitive Skin, Pregnancy and Breastfeeding, Contains Organic Calendula 3-Ounce 
+$10.99 
+[B08KBVJ4XN] 
+Barrel and Oak - Aluminum-Free Deodorant, Deodorant for Men, Essential Oil-Based Scent, 24-Hour Odor Protection, Cedar & Patchouli Blend, Gentle on Sensitive Skin (Mountain Sage, 2.7 oz, 2-Pack) 
+$15.95  
 
 Action: think[B078GWRC1J and B078GTKVXY are bright citrus deodorant less then 50 dollars. I can check B078GWRC1J first.]
 Observation: OK.
