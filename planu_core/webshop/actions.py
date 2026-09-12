@@ -24,6 +24,10 @@ class WebShopAction:
 
         if not isinstance(self.argument, str):
             raise ValueError("WebShop action argument must be a string")
+        if any(character in self.argument for character in "[]\r\n"):
+            raise ValueError(
+                "WebShop action argument cannot contain brackets or line breaks"
+            )
         argument = " ".join(self.argument.split())
         if not argument:
             raise ValueError("WebShop action argument cannot be blank")

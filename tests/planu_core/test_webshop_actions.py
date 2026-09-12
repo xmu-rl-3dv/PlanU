@@ -15,11 +15,32 @@ def test_supported_actions_render_and_expose_stable_keys(kind):
 
 
 def test_action_normalizes_kind_and_argument_whitespace():
-    action = WebShopAction(" ClIcK ", "  Buy \n\t Now  ")
+    action = WebShopAction(" ClIcK ", "  Buy \t  Now  ")
 
     assert action == WebShopAction("click", "Buy Now")
     assert action.key == ("click", "Buy Now")
     assert action.render() == "click[Buy Now]"
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        WebShopAction("search", "blue shoes"),
+        WebShopAction("click", "Buy Now"),
+        WebShopAction("think", "compare\t prices"),
+    ],
+)
+def test_valid_actions_round_trip_through_render_and_parse(action):
+    assert parse_action(action.render()) == action
+
+
+@pytest.mark.parametrize(
+    "argument",
+    ["nested[value", "nested]value", "line\nbreak", "line\rbreak"],
+)
+def test_action_rejects_arguments_that_cannot_round_trip(argument):
+    with pytest.raises(ValueError, match="WebShop action"):
+        WebShopAction("search", argument)
 
 
 @pytest.mark.parametrize(
