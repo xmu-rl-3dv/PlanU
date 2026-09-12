@@ -3,6 +3,7 @@ set -euo pipefail
 
 SOURCE_URL="https://github.com/princeton-nlp/WebShop.git"
 COMMIT="64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+WERKZEUG_REQUIREMENT="Werkzeug==2.1.2"
 START_ATTEMPTS="${WEBSHOP_BOOTSTRAP_START_ATTEMPTS:-120}"
 STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
@@ -100,7 +101,7 @@ verify_clean_checkout() {
     fail "WebShop has uncommitted or untracked changes; refusing to modify it"
 }
 
-verify_environment() {
+verify_python_environment() {
   local version
   [[ -x "${ENV_PREFIX}/bin/python" ]] || return 1
   version="$("${ENV_PREFIX}/bin/python" -c \
@@ -108,11 +109,24 @@ verify_environment() {
   [[ "${version}" == "3.8.13" ]]
 }
 
+verify_werkzeug() {
+  local version
+  version="$("${ENV_PREFIX}/bin/python" -c \
+    'from importlib.metadata import version; print(version("Werkzeug"))'
+  )" || return 1
+  [[ "${version}" == "2.1.2" ]]
+}
+
+verify_environment() {
+  verify_python_environment && verify_werkzeug
+}
+
 verify_small_setup() {
   local index_dir="${ROOT}/search_engine/indexes"
   local -a segment_files
   local -a segment_info_files
 
+  verify_environment || return 1
   # These are the data, resource, and runtime index paths used by the pin.
   [[ -s "${ROOT}/data/items_shuffle_1000.json" ]] || return 1
   [[ -s "${ROOT}/data/items_ins_v2_1000.json" ]] || return 1
@@ -276,7 +290,7 @@ if [[ ! -x "${ENV_PREFIX}/bin/python" ]]; then
     fail "Conda environment creation failed; check package channels and network access"
   fi
 fi
-verify_environment ||
+verify_python_environment ||
   fail "Conda prefix must contain exactly Python 3.8.13: ${ENV_PREFIX}"
 if [[ ! -x "${ENV_PREFIX}/lib/jvm/bin/java" ]]; then
   if ! "${CONDA_EXE}" install -y -p "${ENV_PREFIX}" \
@@ -285,6 +299,14 @@ if [[ ! -x "${ENV_PREFIX}/lib/jvm/bin/java" ]]; then
   fi
 fi
 configure_java_runtime
+if ! verify_werkzeug; then
+  if ! "${ENV_PREFIX}/bin/python" -m pip install \
+    "${WERKZEUG_REQUIREMENT}"; then
+    fail "${WERKZEUG_REQUIREMENT} installation failed; check network access"
+  fi
+fi
+verify_environment ||
+  fail "Conda prefix must contain Python 3.8.13 and ${WERKZEUG_REQUIREMENT}: ${ENV_PREFIX}"
 
 if [[ -f "${SETUP_MARKER}" ]]; then
   verify_small_setup ||
@@ -308,5 +330,5 @@ else
 fi
 
 verify_clean_checkout
-printf 'WebShop ready at %s (commit %s, Python 3.8.13)\n' \
+printf 'WebShop ready at %s (commit %s, Python 3.8.13, Werkzeug 2.1.2)\n' \
   "${ROOT}" "${COMMIT}"

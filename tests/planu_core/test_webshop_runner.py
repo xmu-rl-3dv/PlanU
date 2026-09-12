@@ -412,6 +412,8 @@ def bootstrap_server_environment(
         """
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Werkzeug")'* ]]; then
+  printf '2.1.2\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
   printf 'import\n' > "$FAKE_IMPORT_LOG"
   java_home="$FAKE_ENV_PREFIX/lib/jvm"
@@ -1820,6 +1822,8 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "https://github.com/princeton-nlp/WebShop.git" in bootstrap
     assert "BASH_SOURCE[0]" in bootstrap
     assert "python=3.8.13" in bootstrap
+    assert "Werkzeug==2.1.2" in bootstrap
+    assert "importlib.metadata" in bootstrap
     assert "setup.sh -d small" in bootstrap
     assert "checkout --detach" in bootstrap
     assert "rev-parse --show-toplevel" in bootstrap
@@ -2093,6 +2097,8 @@ def test_webshop_bootstrap_rejects_empty_lucene_index(tmp_path):
         """
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Werkzeug")'* ]]; then
+  printf '2.1.2\n'
 fi
 """,
     )
@@ -2195,6 +2201,12 @@ def test_webshop_fresh_bootstrap_installs_and_exports_java_before_setup(
     write_executable(
         webshop_root / "setup.sh",
         """
+werkzeug="$("$FAKE_ENV_PREFIX/bin/python" -c \
+  'from importlib.metadata import version; print(version("Werkzeug"))')"
+[[ "$werkzeug" == "2.1.2" ]] || {
+  printf 'setup found Werkzeug %s\n' "$werkzeug" >&2
+  exit 30
+}
 java_home="$FAKE_ENV_PREFIX/lib/jvm"
 [[ "${JAVA_HOME:-}" == "$java_home" ]] || {
   printf 'setup missing JAVA_HOME\n' >&2
@@ -2254,6 +2266,20 @@ if [[ "$command" == "create" ]]; then
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Werkzeug")'* ]]; then
+  printf 'python werkzeug\n' >> "$FAKE_EVENT_LOG"
+  [[ -s "$FAKE_WERKZEUG_VERSION_FILE" ]] || exit 61
+  cat "$FAKE_WERKZEUG_VERSION_FILE"
+elif [[ "$*" == "-m pip install Werkzeug==2.1.2" ]]; then
+  java_home="$FAKE_ENV_PREFIX/lib/jvm"
+  [[ -x "$java_home/bin/java" ]] || exit 62
+  [[ "${JAVA_HOME:-}" == "$java_home" ]] || exit 63
+  case ":$PATH:" in
+    *":$java_home/bin:"*) ;;
+    *) exit 64 ;;
+  esac
+  printf 'pip install Werkzeug==2.1.2\n' >> "$FAKE_EVENT_LOG"
+  printf '2.1.2\n' > "$FAKE_WERKZEUG_VERSION_FILE"
 elif [[ "$*" == *"import pyserini"* ]] ||
   [[ "$*" == *"import web_agent_site.app"* ]]; then
   java_home="$FAKE_ENV_PREFIX/lib/jvm"
@@ -2303,6 +2329,7 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         FAKE_ENV_PREFIX=str(env_prefix),
         FAKE_EVENT_LOG=str(event_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_WERKZEUG_VERSION_FILE=str(tmp_path / "werkzeug-version"),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
         WEBSHOP_ROOT=str(webshop_root),
     )
@@ -2318,17 +2345,22 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
 
     assert completed.returncode == 0, completed.stderr
     events = event_log.read_text(encoding="utf-8").splitlines()
-    assert events[:5] == [
-        "conda create -y -p {} python=3.8.13".format(env_prefix),
-        "conda install -y -p {} -c conda-forge openjdk=11".format(
-            env_prefix
-        ),
-        "conda run --no-capture-output -p {} bash ./setup.sh -d small".format(
-            env_prefix
-        ),
-        "setup",
-        "python import -c import pyserini",
-    ]
+    create = "conda create -y -p {} python=3.8.13".format(env_prefix)
+    java = "conda install -y -p {} -c conda-forge openjdk=11".format(
+        env_prefix
+    )
+    werkzeug = "pip install Werkzeug==2.1.2"
+    upstream = (
+        "conda run --no-capture-output -p {} "
+        "bash ./setup.sh -d small"
+    ).format(env_prefix)
+    assert events.index(create) < events.index(java)
+    assert events.index(java) < events.index(werkzeug)
+    assert events.index(werkzeug) < events.index(upstream)
+    assert events.index(upstream) < events.index("setup")
+    assert events.count("python werkzeug") >= 2
+    assert events.index(werkzeug) < events.index("setup")
+    assert "python import -c import pyserini" in events
     assert "python import -c import web_agent_site.app" in events
 
 
@@ -2447,6 +2479,8 @@ EOF
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Werkzeug")'* ]]; then
+  printf '2.1.2\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
   exit 0
 elif [[ "$*" == *"-m web_agent_site.app"* ]]; then

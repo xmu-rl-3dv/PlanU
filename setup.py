@@ -30,7 +30,7 @@ OPTIONAL_DEPENDENCIES = {
         "numpy==1.23.5",
         "Werkzeug==2.0.3",
     ],
-    "webshop": ["beautifulsoup4", "openai"],
+    "webshop": ["beautifulsoup4", "openai==1.109.1"],
 }
 OPTIONAL_DEPENDENCIES["all"] = sorted(
     {

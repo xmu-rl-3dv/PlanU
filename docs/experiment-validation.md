@@ -50,8 +50,10 @@ GPU resources, and all five seeds.
 
 Install `requirements-experiments.txt` with
 `requirements-experiments-lock.txt` as its resolved Python 3.9 constraint set,
-then install the three editable packages as shown in the root README. Run
-`scripts/smoke_phase_one.sh`.
+including `openai==1.109.1` and its exact transitive dependencies. Then install
+the three editable packages as shown in the root README and run
+`scripts/smoke_phase_one.sh`. The OpenAI-compatible client is constructed
+lazily; dependency validation does not require a real key or API request.
 
 The script executes:
 
@@ -94,9 +96,10 @@ bash scripts/bootstrap_webshop.sh
 ```
 
 The bootstrap validates the official remote, exact detached commit, Python
-3.8.13, Java 11, the small dataset, the Lucene index, and server startup. The
-external checkout, environment, downloaded data, and indexes are runtime
-dependencies and are not repository inputs.
+3.8.13, Java 11, `Werkzeug==2.1.2`, the small dataset, the Lucene index, and
+server startup. It installs the Werkzeug pin before the upstream Flask 2.1.2
+setup. The external checkout, environment, downloaded data, and indexes are
+runtime dependencies and are not repository inputs.
 
 ## WebShop reference configuration
 

@@ -35,8 +35,8 @@ The migrated phase-one benchmarks (Overcooked, VirtualHome, and BlockWorld) and
 the phase-two WebShop benchmark use one shared PlanU search implementation:
 
 1. A **State Node** contains **Action Node** children. Executing an action leads
-   to an **outcome State Node**, and repeated stochastic outcomes remain
-   separate children of the same action.
+   to an **outcome State Node**: distinct stochastic outcomes remain separate,
+   while repeated equal `state_key` outcomes merge under the same action.
 2. Every action owns a **Quantile Distribution** initialized by an action
    scorer and, when enabled, a preview reward.
 3. **Upper Confidence Bounds with Curiosity (UCC)** selects actions from a
@@ -125,9 +125,10 @@ python -m pip install --no-deps -e virtual-home
 ```
 
 `requirements-experiments-lock.txt` freezes the resolved Python 3.9 runtime,
-including the compatible Gym/NumPy/DI-engine/Werkzeug combination and
-`easydict` required by RND. The benchmark packages are installed with
-`--no-deps` so they cannot replace these pins.
+including the compatible Gym/NumPy/DI-engine/Werkzeug combination, the tested
+OpenAI SDK used by model-backed WebShop, and `easydict` required by RND. The
+benchmark packages are installed with `--no-deps` so they cannot replace these
+pins.
 
 Prepare the external PlanBench checkout used by BlockWorld:
 
@@ -302,9 +303,10 @@ bash scripts/bootstrap_webshop.sh
 ```
 
 The bootstrap clones and pins the official repository, creates Python 3.8.13,
+installs and verifies `Werkzeug==2.1.2` before the upstream Flask 2.1.2 setup,
 downloads the small 1000-product dataset, builds the Lucene index, and checks
-that the server starts. The checkout must remain clean; generated data, indexes,
-and the isolated environment are excluded from source validation.
+that the server starts. The checkout must remain clean; generated data,
+indexes, and the isolated environment are excluded from source validation.
 
 On macOS arm64, export the Conda OpenJDK paths before bootstrap and smoke:
 The relevant variables are `JAVA_HOME`, `JVM_PATH`, `PATH`,
@@ -328,7 +330,7 @@ WEBSHOP_PYTHON="$WEBSHOP_ENV_PREFIX/bin/python"
 "$WEBSHOP_PYTHON" -m pip install "Cython<3" "setuptools<69" wheel
 "$WEBSHOP_PYTHON" -m pip install --no-build-isolation PyYAML==6.0
 "$WEBSHOP_PYTHON" -m pip install \
-  beautifulsoup4==4.11.1 cleantext==1.1.4 Flask==2.1.2 \
+  beautifulsoup4==4.11.1 cleantext==1.1.4 Flask==2.1.2 Werkzeug==2.1.2 \
   gdown==5.2.0 numpy==1.22.4 pandas==1.4.2 \
   rank-bm25==0.2.2 requests==2.27.1 rich==12.4.4 \
   scipy==1.10.1 spacy==3.3.0 thefuzz==0.19.0 \

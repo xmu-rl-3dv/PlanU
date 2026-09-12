@@ -63,6 +63,9 @@ def test_readme_documents_isolated_python_versions_and_unified_algorithm():
     assert "separate" in prerequisites
     for term in required_terms:
         assert term in algorithm
+    assert "distinct stochastic outcomes remain separate" in algorithm
+    assert "repeated equal `state_key` outcomes merge" in algorithm
+    assert "repeated stochastic outcomes remain separate" not in algorithm
 
 
 def test_readme_scopes_unified_core_claims_to_supported_benchmarks():
@@ -352,9 +355,16 @@ def test_experiment_lock_pins_resolved_transitive_dependencies():
     )
 
     for requirement in (
+        "annotated-types==0.7.0",
+        "distro==1.9.0",
         "gymnasium==1.1.1",
         "huggingface_hub==0.36.2",
+        "jiter==0.16.0",
+        "openai==1.109.1",
+        "pydantic==2.13.5",
+        "pydantic_core==2.46.5",
         "scipy==1.13.1",
+        "typing-inspection==0.4.2",
         "wandb==0.12.16",
     ):
         assert requirement in requirements
@@ -372,6 +382,7 @@ def test_experiment_requirements_pin_compatible_runtime_versions():
         "gym==0.25.1",
         "opencv-python==4.8.1.78",
         "DI-engine==0.5.3",
+        "openai==1.109.1",
         "Werkzeug==2.0.3",
         "torch==2.8.0",
         "transformers==4.57.6",

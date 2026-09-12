@@ -233,6 +233,16 @@ assert "fairscale" not in sys.modules
                 "werkzeug==2.0.3",
             ):
                 self.assertIn(requirement, rnd_requirements)
+            webshop_requirements = {
+                _requirement_key(requirement)
+                for requirement in parsed_requirements
+                if requirement.marker is not None
+                and requirement.marker.evaluate({"extra": "webshop"})
+            }
+            self.assertEqual(
+                webshop_requirements,
+                {"beautifulsoup4", "openai==1.109.1"},
+            )
             self.assertEqual(
                 metadata["Home-page"],
                 "https://github.com/xmu-rl-3dv/PlanU",

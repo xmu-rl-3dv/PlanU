@@ -1,4 +1,4 @@
-# Fully resolved phase-one smoke environment for Python 3.9.
+# Fully resolved PlanU experiment environment for Python 3.9.
 # Install as constraints alongside requirements-experiments.txt.
 absl-py==2.3.1
 accelerate==1.10.1
@@ -7,6 +7,7 @@ aiohttp==3.13.5
 aiosignal==1.4.0
 antlr4-python3-runtime==4.7.2
 anyio==4.12.1
+annotated-types==0.7.0
 async-timeout==5.0.1
 attrs==26.1.0
 beautifulsoup4==4.11.1
@@ -25,6 +26,7 @@ DI-engine==0.5.3
 DI-toolkit==0.3.0
 DI-treetensor==0.5.0
 dill==0.4.0
+distro==1.9.0
 docker-pycreds==0.4.0
 easydict==1.13
 einops==0.8.2
@@ -56,6 +58,7 @@ importlib_metadata==8.7.1
 importlib_resources==6.5.2
 itsdangerous==2.2.0
 Jinja2==3.1.6
+jiter==0.16.0
 joblib==1.5.3
 kiwisolver==1.4.7
 lark-parser==0.12.0
@@ -73,6 +76,7 @@ narwhals==2.21.0
 networkx==3.2.1
 numpy==1.23.5
 opencv-python==4.8.1.78
+openai==1.109.1
 packaging==26.3
 pandas==2.3.3
 pathtools==0.1.2
@@ -86,6 +90,8 @@ protobuf==6.33.6
 psutil==7.2.2
 pyarrow==21.0.0
 pycparser==2.23
+pydantic==2.13.5
+pydantic_core==2.46.5
 pygame==2.4.0
 Pygments==2.21.0
 pynng==0.9.0
@@ -126,6 +132,7 @@ transformers==4.57.6
 treevalue==1.5.0
 trueskill==0.4.5
 typing_extensions==4.16.0
+typing-inspection==0.4.2
 tzdata==2026.3
 urllib3==1.26.20
 URLObject==3.0.0
