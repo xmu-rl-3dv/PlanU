@@ -151,7 +151,6 @@ verify_server_startup() {
   local attempt=0
   local log_path="${ENV_PREFIX}/bootstrap-server.log"
 
-  configure_java_runtime
   if server_reachable; then
     fail "port 3000 is already serving a process not started by this bootstrap"
   fi
@@ -265,6 +264,13 @@ if [[ ! -x "${ENV_PREFIX}/bin/python" ]]; then
 fi
 verify_environment ||
   fail "Conda prefix must contain exactly Python 3.8.13: ${ENV_PREFIX}"
+if [[ ! -x "${ENV_PREFIX}/lib/jvm/bin/java" ]]; then
+  if ! "${CONDA_EXE}" install -y -p "${ENV_PREFIX}" \
+    -c conda-forge openjdk=11; then
+    fail "OpenJDK 11 installation failed; check conda-forge access and network connectivity"
+  fi
+fi
+configure_java_runtime
 
 if [[ -f "${SETUP_MARKER}" ]]; then
   verify_small_setup ||

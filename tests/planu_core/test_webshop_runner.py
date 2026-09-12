@@ -390,7 +390,12 @@ def bootstrap_server_environment(tmp_path, *, include_java=True):
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
-  exit 0
+  java_home="$FAKE_ENV_PREFIX/lib/jvm"
+  [[ "${JAVA_HOME:-}" == "$java_home" ]] || exit 21
+  case ":$PATH:" in
+    *":$java_home/bin:"*) ;;
+    *) exit 22 ;;
+  esac
 elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
   printf 'JAVA_HOME=%s\nPATH=%s\n' \
     "${JAVA_HOME:-}" "$PATH" > "$FAKE_SERVER_ENV_LOG"
@@ -439,6 +444,7 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
     environment = script_environment(
         fake_bin,
         FAKE_GIT_LOG=str(git_log),
+        FAKE_ENV_PREFIX=str(env_prefix),
         FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
@@ -2053,6 +2059,9 @@ def test_webshop_bootstrap_rejects_empty_lucene_index(tmp_path):
     (webshop_root / "search_engine" / "indexes").mkdir(parents=True)
     env_prefix = webshop_root / ".conda-planu"
     (env_prefix / "bin").mkdir(parents=True)
+    java_bin = env_prefix / "lib" / "jvm" / "bin"
+    java_bin.mkdir(parents=True)
+    write_executable(java_bin / "java", "exit 0\n")
     write_executable(
         env_prefix / "bin" / "python",
         """
@@ -2131,6 +2140,154 @@ def test_webshop_bootstrap_configures_resolved_conda_java_for_server(tmp_path):
         "JAVA_HOME={}".format(java_home),
         "PATH={}:{}".format(java_home / "bin", environment["PATH"]),
     ]
+
+
+def test_webshop_fresh_bootstrap_installs_and_exports_java_before_setup(
+    tmp_path,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    webshop_root = tmp_path / "WebShop"
+    (webshop_root / ".git").mkdir(parents=True)
+    env_prefix = webshop_root / ".conda-planu"
+    event_log = tmp_path / "events.log"
+    server_pid_log = tmp_path / "server.pid"
+    write_executable(
+        webshop_root / "setup.sh",
+        """
+java_home="$FAKE_ENV_PREFIX/lib/jvm"
+[[ "${JAVA_HOME:-}" == "$java_home" ]] || {
+  printf 'setup missing JAVA_HOME\n' >&2
+  exit 31
+}
+case ":$PATH:" in
+  *":$java_home/bin:"*) ;;
+  *)
+    printf 'setup missing Java PATH\n' >&2
+    exit 32
+    ;;
+esac
+printf 'setup\n' >> "$FAKE_EVENT_LOG"
+"$FAKE_ENV_PREFIX/bin/python" -c 'import pyserini'
+mkdir -p data search_engine/resources search_engine/indexes
+printf '{}\n' > data/items_shuffle_1000.json
+printf '{}\n' > data/items_ins_v2_1000.json
+printf '{}\n' > data/items_human_ins.json
+printf '{}\n' > search_engine/resources/documents.jsonl
+printf 'segments\n' > search_engine/indexes/segments_1
+printf 'segment info\n' > search_engine/indexes/_0.si
+""",
+    )
+    write_executable(
+        fake_bin / "git",
+        """
+case "$*" in
+  *"rev-parse --is-inside-work-tree"*) printf 'true\n' ;;
+  *"rev-parse --show-toplevel"*) printf '%s\n' "$FAKE_WEBSHOP_TOPLEVEL" ;;
+  *"remote get-url origin"*)
+    printf 'https://github.com/princeton-nlp/WebShop.git\n'
+    ;;
+  *"status --porcelain"*) ;;
+  *"cat-file -e"*) ;;
+  *"rev-parse HEAD"*)
+    printf '64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd\n'
+    ;;
+  *"symbolic-ref -q HEAD"*) exit 1 ;;
+esac
+""",
+    )
+    write_executable(
+        fake_bin / "conda",
+        """
+command="${1:-}"
+printf 'conda %s\n' "$*" >> "$FAKE_EVENT_LOG"
+if [[ "$command" == "create" ]]; then
+  while (($#)); do
+    if [[ "$1" == "-p" ]]; then
+      prefix="$2"
+      break
+    fi
+    shift
+  done
+  mkdir -p "$prefix/bin"
+  cat > "$prefix/bin/python" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"platform.python_version"* ]]; then
+  printf '3.8.13\n'
+elif [[ "$*" == *"import pyserini"* ]] ||
+  [[ "$*" == *"import web_agent_site.app"* ]]; then
+  java_home="$FAKE_ENV_PREFIX/lib/jvm"
+  [[ -x "$java_home/bin/java" ]] || exit 41
+  [[ "${JAVA_HOME:-}" == "$java_home" ]] || exit 42
+  case ":$PATH:" in
+    *":$java_home/bin:"*) ;;
+    *) exit 43 ;;
+  esac
+  printf 'python import %s\n' "$*" >> "$FAKE_EVENT_LOG"
+elif [[ "$*" == *"-m web_agent_site.app"* ]]; then
+  printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+  trap 'exit 0' TERM INT
+  while true; do sleep 1; done
+fi
+EOF
+  chmod +x "$prefix/bin/python"
+elif [[ "$command" == "install" ]]; then
+  [[ "$*" == "install -y -p $FAKE_ENV_PREFIX -c conda-forge openjdk=11" ]] ||
+    exit 51
+  mkdir -p "$FAKE_ENV_PREFIX/lib/jvm/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' \
+    > "$FAKE_ENV_PREFIX/lib/jvm/bin/java"
+  chmod +x "$FAKE_ENV_PREFIX/lib/jvm/bin/java"
+elif [[ "$command" == "run" ]]; then
+  java_home="$FAKE_ENV_PREFIX/lib/jvm"
+  [[ "${JAVA_HOME:-}" == "$java_home" ]] || exit 52
+  case ":$PATH:" in
+    *":$java_home/bin:"*) ;;
+    *) exit 53 ;;
+  esac
+  bash ./setup.sh -d small
+fi
+""",
+    )
+    write_executable(
+        fake_bin / "curl",
+        """
+[[ -s "$FAKE_SERVER_PID_LOG" ]] || exit 1
+kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
+""",
+    )
+    environment = script_environment(
+        fake_bin,
+        FAKE_ENV_PREFIX=str(env_prefix),
+        FAKE_EVENT_LOG=str(event_log),
+        FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
+        WEBSHOP_ROOT=str(webshop_root),
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    events = event_log.read_text(encoding="utf-8").splitlines()
+    assert events[:5] == [
+        "conda create -y -p {} python=3.8.13".format(env_prefix),
+        "conda install -y -p {} -c conda-forge openjdk=11".format(
+            env_prefix
+        ),
+        "conda run --no-capture-output -p {} bash ./setup.sh -d small".format(
+            env_prefix
+        ),
+        "setup",
+        "python import -c import pyserini",
+    ]
+    assert "python import -c import web_agent_site.app" in events
 
 
 def test_webshop_bootstrap_fails_clearly_when_conda_java_is_missing(tmp_path):
