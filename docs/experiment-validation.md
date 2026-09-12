@@ -1,8 +1,10 @@
-# Phase-One Experiment Validation
+# Experiment Validation
 
 This document separates paper/reference runs from executable smoke runs.
 Smoke runs validate the complete software path but do not reproduce paper
 metrics because they use a tiny public model and a reduced search budget.
+For WebShop, the smoke uses a deterministic scripted provider against the
+pinned real server instead of a paid model backend.
 
 ## Reference configurations
 
@@ -75,3 +77,128 @@ to test another checkpoint; use the reference launchers for paper-scale runs.
   terminal handling, and reference launcher values are covered by unit tests.
 - Effective configs and dependency versions are written to TensorBoard or
   JSON provenance before evaluation.
+
+## WebShop server setup
+
+WebShop uses two isolated runtimes. PlanU and the shared search run under
+Python 3.9. The official server runs under Python 3.8.13 with Java 11 and
+Pyserini. The server checkout is pinned exactly to
+`princeton-nlp/WebShop@64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd`.
+
+From the PlanU repository root, bootstrap the external server with:
+
+```bash
+export WEBSHOP_ROOT="$PWD/external/WebShop"
+export WEBSHOP_ENV_PREFIX="$WEBSHOP_ROOT/.conda-planu"
+bash scripts/bootstrap_webshop.sh
+```
+
+The bootstrap validates the official remote, exact detached commit, Python
+3.8.13, Java 11, the small dataset, the Lucene index, and server startup. The
+external checkout, environment, downloaded data, and indexes are runtime
+dependencies and are not repository inputs.
+
+## WebShop reference configuration
+
+This is the exact effective reference profile recovered from the legacy
+launcher and represented by `webshop/planu.sh` and
+`python -m planu_core.webshop.runner`:
+
+| Setting | Value |
+| --- | --- |
+| Official server | `princeton-nlp/WebShop@64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd` |
+| Backend | `qwen-plus` |
+| Temperature | `0.8` |
+| Prompt mode | `cot` |
+| Generated candidates per expansion | `5` |
+| Evaluation samples per candidate | `1` |
+| Search iterations | `10` |
+| Expanded tree depth | `10` |
+| Task range | `fixed_1` through `fixed_49` |
+| Quantiles | `51` midpoint quantiles |
+| Quantile range | `[0, 1]` |
+| Quantile learning rate | `0.9` |
+| Stochastic latency distribution | log-normal `mu=0`, `sigma=10` milliseconds |
+| Latency threshold | `200` milliseconds |
+
+The range is half-open:
+`--task-start-index 1 --task-end-index 50` selects `fixed_1` through
+`fixed_49`. The remaining shared-core values are discount `1.0`, curiosity
+weight `0.0`, preview reward enabled, categorical initialization disabled, and
+risk distortion `0.0`. Model credentials and the compatible API base URL are
+provided through environment variables and are excluded from artifacts.
+
+## Intentional corrections from the legacy WebShop implementation
+
+The migration preserves the effective profile above, but it does not preserve
+broken or disconnected control flow:
+
+- A done page is terminal for every valid reward in `[0, 1]`, including a
+  partial-credit or zero-reward purchase. The legacy path continued unless the
+  reward was exactly `1`.
+- One single depth limit of `10` governs shared search. The separate depth-20
+  rollout and its duplicate private tree traversal were removed.
+- The action scorer initializes candidate quantiles directly. This replaces
+  fixed `0.5` quantiles plus a disconnected scorer-selected rollout.
+- Every completed trajectory uses the shared suffix-return quantile backup
+  with learning rate `0.9`; action nodes, rather than state nodes, own return
+  distributions.
+- Stochastic latency uses the explicit NumPy generator supplied by
+  `PlanUSearch`, not process-global random state. Search and Buy Now actions
+  remain exempt from latency failure.
+- Malformed or unavailable invalid generated actions are benchmark outcomes
+  with reward `-1`; their learning target is clipped to the configured
+  quantile support `[0, 1]`. Infrastructure failures still abort the run.
+
+These corrections mean unified WebShop trajectories are not expected to be
+bit-identical to the legacy private implementation.
+
+## WebShop parity and evidence
+
+Automated contract tests cover official route construction and structured
+parsing for init, search, item, subpage, and done pages. Adapter tests cover
+reset, search, item selection, option selection, subpage navigation, back and
+pagination behavior, purchase rewards, partial-credit termination, invalid
+actions, seeded latency outcomes, state snapshots, and shared quantile backup.
+Runner tests pin the half-open reference configuration, credential handling,
+provenance, resume behavior, and smoke artifact validation.
+
+Those are automated contract tests using controlled responses. The
+authoritative real-server smoke separately proves the local official checkout,
+Flask/Lucene HTTP path, parser, action provider, adapter, shared
+`PlanUSearch`, one suffix-return backup, and persistence for `fixed_1`.
+Real-server option, subpage, back, and pagination coverage, the model-backed
+provider/scorer, tasks after `fixed_1`, and benchmark-level quality are not
+established by the smoke.
+
+## WebShop real smoke
+
+Run from a clean PlanU source checkout after bootstrapping the pinned server:
+
+```bash
+export PLANU_PYTHON="$PWD/.venv/bin/python"
+export WEBSHOP_ROOT="$PWD/external/WebShop"
+export WEBSHOP_ENV_PREFIX="$WEBSHOP_ROOT/.conda-planu"
+bash scripts/smoke_webshop.sh
+```
+
+`RUN_ROOT` is optional. When it is unset, the script creates a unique temporary
+directory and prints it; when it is set, it selects the output directory. It
+is not an authoritative input. The evidence schema is:
+
+- `<run-root>/run_manifest.json`
+- `<run-root>/effective_config.json`
+- `<run-root>/run_metadata.json`
+- `<run-root>/results.jsonl`
+- `<run-root>/tasks/fixed_1.json`
+- `<run-root>/webshop-server.log`
+
+The final authoritative smoke facts for this migration are limited to one
+task: exit `0`, `task_id: fixed_1`, `model_id: scripted`,
+`http_transition_count: 3`, `quantile_backup_count: 1`,
+`best_terminal_reward: 0.0`, and `success: false`. The HTTP trajectory is
+`search[product] -> click[ASIN] -> click[Buy Now]`, against the exact official
+server commit above. The zero reward is expected from the generic scripted
+purchase. This smoke validates execution and provenance; it does not reproduce
+paper metrics and does not support a success claim for the model-backed
+reference profile or any task beyond `fixed_1`.
