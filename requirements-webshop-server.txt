@@ -1,0 +1,27 @@
+# Exact direct dependencies for princeton-nlp/WebShop@64fa2a5 on Python 3.8.
+# Used as PIP_CONSTRAINT by scripts/bootstrap_webshop.sh.
+beautifulsoup4==4.11.1
+cleantext==1.1.4
+env==0.1.0
+Flask==2.1.2
+gdown==5.2.0
+gradio==3.50.2
+gym==0.24.0
+numpy==1.22.4
+pandas==1.4.2
+pyserini==0.17.0
+pytest==7.4.4
+PyYAML==6.0
+rank_bm25==0.2.2
+requests==2.27.1
+requests-mock==1.12.1
+rich==12.4.4
+scikit_learn==1.1.1
+selenium==4.2.0
+spacy==3.3.0
+thefuzz==0.19.0
+torch==1.11.0
+tqdm==4.64.0
+train==0.0.5
+transformers==4.19.2
+Werkzeug==2.1.2

@@ -50,10 +50,12 @@ GPU resources, and all five seeds.
 
 Install `requirements-experiments.txt` with
 `requirements-experiments-lock.txt` as its resolved Python 3.9 constraint set,
-including `openai==1.109.1` and its exact transitive dependencies. Then install
-the three editable packages as shown in the root README and run
-`scripts/smoke_phase_one.sh`. The OpenAI-compatible client is constructed
-lazily; dependency validation does not require a real key or API request.
+including `openai==1.109.1` and its exact transitive dependencies. The lock
+contains 144 exact pins: the prior 143 resolved distributions plus the
+explicit build-tool pin `setuptools==66.1.1`. Then install the three editable
+packages as shown in the root README and run `scripts/smoke_phase_one.sh`. The
+OpenAI-compatible client is constructed lazily; dependency validation does
+not require a real key or API request.
 
 The script executes:
 
@@ -96,9 +98,13 @@ bash scripts/bootstrap_webshop.sh
 ```
 
 The bootstrap validates the official remote, exact detached commit, Python
-3.8.13, Java 11, `Werkzeug==2.1.2`, the small dataset, the Lucene index, and
-server startup. It installs the Werkzeug pin before the upstream Flask 2.1.2
-setup. The external checkout, environment, downloaded data, and indexes are
+3.8.13, Java 11, Flask 2.1.2, Werkzeug 2.1.2, the small dataset, the Lucene
+index, and server startup. Before upstream setup it exports `PIP_CONSTRAINT`
+pointing to `requirements-webshop-server.txt`, which exactly pins the direct
+official dependencies and the Python 3.8-compatible gdown, Gradio, pytest, and
+requests-mock versions. The three small data files must match the documented
+SHA-256 values before their derived index is accepted or the setup marker is
+written. The external checkout, environment, downloaded data, and indexes are
 runtime dependencies and are not repository inputs.
 
 ## WebShop reference configuration
@@ -130,6 +136,8 @@ The range is half-open:
 weight `0.0`, preview reward enabled, categorical initialization disabled, and
 risk distortion `0.0`. Model credentials and the compatible API base URL are
 provided through environment variables and are excluded from artifacts.
+Historical credentials in Git history remain out of scope for history
+rewriting and must be rotated with the external provider.
 
 ## Intentional corrections from the legacy WebShop implementation
 
@@ -195,6 +203,14 @@ is not an authoritative input. The evidence schema is:
 - `<run-root>/results.jsonl`
 - `<run-root>/tasks/fixed_1.json`
 - `<run-root>/webshop-server.log`
+- `<run-root>/server_runtime.json`
+
+Before starting the server, the smoke executes `WEBSHOP_PYTHON` and requires
+exactly Python 3.8.13, Flask 2.1.2, and Werkzeug 2.1.2. The atomic
+`server_runtime.json` records those versions, the Java 11 version string, the
+pinned WebShop commit, the complete normalized package mapping, and its
+deterministic environment SHA-256. Final artifact validation recomputes that
+hash and verifies every field.
 
 The final authoritative smoke facts for this migration are limited to one
 task: exit `0`, `task_id: fixed_1`, `model_id: scripted`,

@@ -13,6 +13,7 @@ STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
 SERVER_PGID=""
 SERVER_COMMIT=""
+JAVA_VERSION_LINE=""
 
 fail() {
   printf 'WebShop smoke error: %s\n' "$*" >&2
@@ -119,24 +120,162 @@ server_reachable() {
 
 configure_java_runtime() {
   local java_version_output
-  local java_version_line
 
   JAVA_HOME="${WEBSHOP_ENV_PREFIX}/lib/jvm"
   [[ -x "${JAVA_HOME}/bin/java" ]] ||
     fail "Conda Java runtime is missing: ${JAVA_HOME}/bin/java"
   if ! java_version_output="$("${JAVA_HOME}/bin/java" -version 2>&1)"; then
-    java_version_line="${java_version_output%%$'\n'*}"
-    fail "could not run ${JAVA_HOME}/bin/java -version: ${java_version_line:-no output}"
+    JAVA_VERSION_LINE="${java_version_output%%$'\n'*}"
+    fail "could not run ${JAVA_HOME}/bin/java -version: ${JAVA_VERSION_LINE:-no output}"
   fi
-  java_version_line="${java_version_output%%$'\n'*}"
-  case "${java_version_line}" in
+  JAVA_VERSION_LINE="${java_version_output%%$'\n'*}"
+  case "${JAVA_VERSION_LINE}" in
     'openjdk version "11.'* | 'java version "11.'*) ;;
     *)
-      fail "Java 11 is required at ${JAVA_HOME}/bin/java; found: ${java_version_line:-no version output}"
+      fail "Java 11 is required at ${JAVA_HOME}/bin/java; found: ${JAVA_VERSION_LINE:-no version output}"
       ;;
   esac
   export JAVA_HOME
   export PATH="${JAVA_HOME}/bin:${PATH}"
+}
+
+write_server_runtime_attestation() {
+  local executable_type
+  local runtime_json
+
+  executable_type="$(file -L -b --mime-type "${WEBSHOP_PYTHON}")" ||
+    fail "could not inspect pinned WebShop Python executable"
+  case "${executable_type}" in
+    application/x-executable | application/x-mach-binary | \
+      application/x-pie-executable)
+      ;;
+    *)
+      fail "pinned WebShop Python must be a native Python executable; found ${executable_type}"
+      ;;
+  esac
+
+  runtime_json="$("${WEBSHOP_PYTHON}" -c '
+import hashlib
+from importlib.metadata import distributions, version
+import json
+import platform
+import re
+
+python_version = platform.python_version()
+flask_version = version("Flask")
+werkzeug_version = version("Werkzeug")
+if python_version != "3.8.13":
+    raise SystemExit("Python 3.8.13 is required; found " + python_version)
+if flask_version != "2.1.2":
+    raise SystemExit("Flask 2.1.2 is required; found " + flask_version)
+if werkzeug_version != "2.1.2":
+    raise SystemExit("Werkzeug 2.1.2 is required; found " + werkzeug_version)
+
+packages = {}
+for distribution in distributions():
+    raw_name = distribution.metadata.get("Name")
+    if not raw_name:
+        continue
+    name = re.sub(r"[-_.]+", "-", raw_name).lower()
+    prior = packages.get(name)
+    if prior is not None and prior != distribution.version:
+        raise SystemExit("conflicting installed distributions for " + name)
+    packages[name] = distribution.version
+packages = dict(sorted(packages.items()))
+environment = {
+    "packages": packages,
+    "python_version": python_version,
+}
+environment_sha256 = hashlib.sha256(
+    json.dumps(
+        environment,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+print(json.dumps({
+    "environment_sha256": environment_sha256,
+    "flask_version": flask_version,
+    "packages": packages,
+    "python_version": python_version,
+    "werkzeug_version": werkzeug_version,
+}, sort_keys=True, separators=(",", ":")))
+')" || fail "pinned WebShop Python runtime attestation failed"
+
+  python3 - \
+    "${RUN_ROOT}/server_runtime.json" "${runtime_json}" \
+    "${JAVA_VERSION_LINE}" "${SERVER_COMMIT}" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+destination = Path(sys.argv[1])
+try:
+    runtime = json.loads(sys.argv[2])
+except (TypeError, ValueError) as error:
+    raise SystemExit("invalid WebShop Python runtime attestation") from error
+if not isinstance(runtime, dict):
+    raise SystemExit("WebShop Python runtime attestation must be an object")
+expected_keys = {
+    "environment_sha256",
+    "flask_version",
+    "packages",
+    "python_version",
+    "werkzeug_version",
+}
+if set(runtime) != expected_keys:
+    raise SystemExit("WebShop Python runtime attestation keys are invalid")
+if runtime["python_version"] != "3.8.13":
+    raise SystemExit("server runtime Python version is not 3.8.13")
+if runtime["flask_version"] != "2.1.2":
+    raise SystemExit("server runtime Flask version is not 2.1.2")
+if runtime["werkzeug_version"] != "2.1.2":
+    raise SystemExit("server runtime Werkzeug version is not 2.1.2")
+packages = runtime["packages"]
+if (
+    not isinstance(packages, dict)
+    or not packages
+    or packages.get("flask") != "2.1.2"
+    or packages.get("werkzeug") != "2.1.2"
+):
+    raise SystemExit("WebShop Python runtime package mapping is invalid")
+environment = {
+    "packages": packages,
+    "python_version": runtime["python_version"],
+}
+environment_sha256 = hashlib.sha256(
+    json.dumps(
+        environment,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+if runtime["environment_sha256"] != environment_sha256:
+    raise SystemExit("server runtime environment hash is invalid")
+runtime["java_version"] = sys.argv[3]
+runtime["webshop_commit"] = sys.argv[4]
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=".{}.".format(destination.name),
+    suffix=".tmp",
+    dir=str(destination.parent),
+)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(runtime, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_name, destination)
+except BaseException:
+    try:
+        os.unlink(temporary_name)
+    except FileNotFoundError:
+        pass
+    raise
+PY
 }
 
 verify_planu_source_clean() {
@@ -215,6 +354,7 @@ trap 'exit 143' TERM
 require_command python3
 require_command git
 require_command curl
+require_command file
 SCRIPT_PATH="$(canonical_path "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
@@ -286,6 +426,7 @@ working_tree_status="$(
 [[ -x "${WEBSHOP_PYTHON}" ]] ||
   fail "pinned WebShop Python is missing; run scripts/bootstrap_webshop.sh"
 configure_java_runtime
+write_server_runtime_attestation
 server_reachable &&
   fail "port 3000 is already serving a process not started by this smoke run"
 
@@ -332,7 +473,7 @@ cd "${PROJECT_ROOT}"
 
 "${PLANU_PYTHON}" - \
   "${RUN_ROOT}" "${SERVER_COMMIT}" "${PLANU_COMMIT}" "${WEBSHOP_URL}" \
-  "${SMOKE_QUERY}" <<'PY'
+  "${SMOKE_QUERY}" "${JAVA_VERSION_LINE}" <<'PY'
 import hashlib
 import json
 import math
@@ -345,6 +486,7 @@ expected_commit = sys.argv[2]
 expected_planu_commit = sys.argv[3]
 configured_server_url = sys.argv[4]
 expected_smoke_query = sys.argv[5]
+expected_java_version = sys.argv[6]
 
 
 def load_object(path):
@@ -397,6 +539,7 @@ def redacted_url(url):
 manifest = load_object(run_root / "run_manifest.json")
 effective = load_object(run_root / "effective_config.json")
 metadata = load_object(run_root / "run_metadata.json")
+server_runtime = load_object(run_root / "server_runtime.json")
 task = load_object(run_root / "tasks" / "fixed_1.json")
 with (run_root / "results.jsonl").open("r", encoding="utf-8") as handle:
     raw_result_lines = [line for line in handle if line.strip()]
@@ -483,6 +626,58 @@ expected_hash = hashlib.sha256(
 ).hexdigest()[:12]
 if metadata.get("config_hash") != expected_hash:
     raise SystemExit("run metadata config hash is invalid")
+
+require_exact_keys(
+    server_runtime,
+    {
+        "environment_sha256",
+        "flask_version",
+        "java_version",
+        "packages",
+        "python_version",
+        "webshop_commit",
+        "werkzeug_version",
+    },
+    "server runtime",
+)
+if server_runtime.get("python_version") != "3.8.13":
+    raise SystemExit("server runtime Python version is not 3.8.13")
+if server_runtime.get("flask_version") != "2.1.2":
+    raise SystemExit("server runtime Flask version is not 2.1.2")
+if server_runtime.get("werkzeug_version") != "2.1.2":
+    raise SystemExit("server runtime Werkzeug version is not 2.1.2")
+if server_runtime.get("java_version") != expected_java_version:
+    raise SystemExit("server runtime Java version does not match execution")
+if server_runtime.get("webshop_commit") != expected_commit:
+    raise SystemExit("server runtime WebShop commit does not match checkout")
+server_packages = server_runtime.get("packages")
+if not isinstance(server_packages, dict) or not server_packages:
+    raise SystemExit("server runtime packages must be a nonempty object")
+if server_packages.get("flask") != "2.1.2":
+    raise SystemExit("server runtime packages do not contain Flask 2.1.2")
+if server_packages.get("werkzeug") != "2.1.2":
+    raise SystemExit("server runtime packages do not contain Werkzeug 2.1.2")
+if any(
+    not isinstance(name, str)
+    or not name
+    or not isinstance(value, str)
+    or not value
+    for name, value in server_packages.items()
+):
+    raise SystemExit("server runtime package mapping is invalid")
+server_environment = {
+    "packages": server_packages,
+    "python_version": server_runtime["python_version"],
+}
+server_environment_sha256 = hashlib.sha256(
+    json.dumps(
+        server_environment,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+if server_runtime.get("environment_sha256") != server_environment_sha256:
+    raise SystemExit("server runtime environment hash is invalid")
 
 args = effective["args"]
 require_exact_keys(

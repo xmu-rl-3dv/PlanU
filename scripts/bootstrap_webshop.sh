@@ -4,6 +4,9 @@ set -euo pipefail
 SOURCE_URL="https://github.com/princeton-nlp/WebShop.git"
 COMMIT="64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
 WERKZEUG_REQUIREMENT="Werkzeug==2.1.2"
+ITEMS_SHUFFLE_SHA256="30a4765c3a327af72d9a9a95a6b2486d516f0fa1d3ecd83681901ce82a21b269"
+ITEMS_INS_SHA256="f88a36314a397b53b3d9c3fa5878e5f7b26d35019a51ec83fbedeca61a948f6f"
+ITEMS_HUMAN_SHA256="cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3"
 START_ATTEMPTS="${WEBSHOP_BOOTSTRAP_START_ATTEMPTS:-120}"
 STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
@@ -117,8 +120,45 @@ verify_werkzeug() {
   [[ "${version}" == "2.1.2" ]]
 }
 
+verify_flask() {
+  local version
+  version="$("${ENV_PREFIX}/bin/python" -c \
+    'from importlib.metadata import version; print(version("Flask"))'
+  )" || return 1
+  [[ "${version}" == "2.1.2" ]]
+}
+
 verify_environment() {
-  verify_python_environment && verify_werkzeug
+  verify_python_environment && verify_flask && verify_werkzeug
+}
+
+verify_data_file() {
+  local path="$1"
+  local expected="$2"
+  local actual
+
+  [[ -s "${path}" ]] || {
+    printf 'WebShop bootstrap error: required data file is missing or empty: %s\n' \
+      "${path}" >&2
+    return 1
+  }
+  actual="$(
+    python3 - "${path}" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+  )" || return 1
+  [[ "${actual}" == "${expected}" ]] || {
+    printf 'WebShop bootstrap error: SHA-256 mismatch for %s: expected %s, found %s\n' \
+      "${path}" "${expected}" "${actual:-unavailable}" >&2
+    return 1
+  }
 }
 
 verify_small_setup() {
@@ -127,10 +167,16 @@ verify_small_setup() {
   local -a segment_info_files
 
   verify_environment || return 1
-  # These are the data, resource, and runtime index paths used by the pin.
-  [[ -s "${ROOT}/data/items_shuffle_1000.json" ]] || return 1
-  [[ -s "${ROOT}/data/items_ins_v2_1000.json" ]] || return 1
-  [[ -s "${ROOT}/data/items_human_ins.json" ]] || return 1
+  verify_data_file \
+    "${ROOT}/data/items_shuffle_1000.json" "${ITEMS_SHUFFLE_SHA256}" ||
+    return 1
+  verify_data_file \
+    "${ROOT}/data/items_ins_v2_1000.json" "${ITEMS_INS_SHA256}" ||
+    return 1
+  verify_data_file \
+    "${ROOT}/data/items_human_ins.json" "${ITEMS_HUMAN_SHA256}" ||
+    return 1
+  # Verify source data before accepting its derived resource and index files.
   [[ -s "${ROOT}/search_engine/resources/documents.jsonl" ]] || return 1
   [[ -d "${index_dir}" ]] || return 1
   shopt -s nullglob
@@ -220,7 +266,11 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
 ROOT="$(canonical_path "${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}")"
 ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX:-${ROOT}/.conda-planu}")"
+PIP_CONSTRAINT="${PROJECT_ROOT}/requirements-webshop-server.txt"
 SETUP_MARKER="${ENV_PREFIX}/.planu-webshop-small-${COMMIT}"
+[[ -f "${PIP_CONSTRAINT}" ]] ||
+  fail "server constraint file is missing: ${PIP_CONSTRAINT}"
+export PIP_CONSTRAINT
 
 case "${START_ATTEMPTS}" in
   "" | *[!0-9]*) fail "WEBSHOP_BOOTSTRAP_START_ATTEMPTS must be a positive integer" ;;
@@ -305,7 +355,7 @@ if ! verify_werkzeug; then
     fail "${WERKZEUG_REQUIREMENT} installation failed; check network access"
   fi
 fi
-verify_environment ||
+verify_python_environment && verify_werkzeug ||
   fail "Conda prefix must contain Python 3.8.13 and ${WERKZEUG_REQUIREMENT}: ${ENV_PREFIX}"
 
 if [[ -f "${SETUP_MARKER}" ]]; then
@@ -330,5 +380,5 @@ else
 fi
 
 verify_clean_checkout
-printf 'WebShop ready at %s (commit %s, Python 3.8.13, Werkzeug 2.1.2)\n' \
+printf 'WebShop ready at %s (commit %s, Python 3.8.13, Flask 2.1.2, Werkzeug 2.1.2)\n' \
   "${ROOT}" "${COMMIT}"

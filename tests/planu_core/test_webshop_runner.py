@@ -54,6 +54,35 @@ def script_environment(bin_dir, **values):
     return environment
 
 
+def write_hashing_python_fake(path):
+    write_executable(
+        path,
+        r"""
+if [[ "${1:-}" == "-" && "${2:-}" == */data/*.json ]]; then
+  filename="${2##*/}"
+  if [[ "${FAKE_DATA_SHA_MISMATCH:-}" == "$filename" ]]; then
+    printf '%064d\n' 0
+    exit 0
+  fi
+  case "$filename" in
+    items_shuffle_1000.json)
+      printf '%s\n' '30a4765c3a327af72d9a9a95a6b2486d516f0fa1d3ecd83681901ce82a21b269'
+      ;;
+    items_ins_v2_1000.json)
+      printf '%s\n' 'f88a36314a397b53b3d9c3fa5878e5f7b26d35019a51ec83fbedeca61a948f6f'
+      ;;
+    items_human_ins.json)
+      printf '%s\n' 'cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3'
+      ;;
+    *) exit 92 ;;
+  esac
+  exit 0
+fi
+exec "$FAKE_REAL_PYTHON" "$@"
+""",
+    )
+
+
 def write_smoke_runner_fake(path):
     write_executable(
         path,
@@ -268,6 +297,17 @@ for name, payload in (
     json.dumps(result_task, sort_keys=True) + "\n",
     encoding="utf-8",
 )
+if mode in ("server_runtime_wrong_hash", "server_runtime_wrong_flask"):
+    runtime_path = output_dir / "server_runtime.json"
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    if mode == "server_runtime_wrong_hash":
+        runtime["environment_sha256"] = "0" * 64
+    else:
+        runtime["flask_version"] = "9.9.9"
+    runtime_path.write_text(
+        json.dumps(runtime, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 PY
 """,
     )
@@ -293,6 +333,41 @@ def local_smoke_environment(
     child_pid_log = tmp_path / "child.pid"
     server_env_log = tmp_path / "server.env"
     server_source = r"""
+if [[ "${1:-}" == "-c" ]]; then
+  "$FAKE_REAL_PYTHON" - \
+    "${FAKE_SERVER_PYTHON_VERSION:-3.8.13}" \
+    "${FAKE_SERVER_FLASK_VERSION:-2.1.2}" \
+    "${FAKE_SERVER_WERKZEUG_VERSION:-2.1.2}" <<'PY'
+import hashlib
+import json
+import sys
+
+python_version, flask_version, werkzeug_version = sys.argv[1:]
+packages = {
+    "flask": flask_version,
+    "test-package": "1.0",
+    "werkzeug": werkzeug_version,
+}
+environment = {
+    "packages": packages,
+    "python_version": python_version,
+}
+print(json.dumps({
+    "environment_sha256": hashlib.sha256(
+        json.dumps(
+            environment,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest(),
+    "flask_version": flask_version,
+    "packages": packages,
+    "python_version": python_version,
+    "werkzeug_version": werkzeug_version,
+}, sort_keys=True, separators=(",", ":")))
+PY
+  exit
+fi
 printf 'JAVA_HOME=%s\nPATH=%s\n' \
   "${JAVA_HOME:-}" "$PATH" > "$FAKE_SERVER_ENV_LOG"
 printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
@@ -310,6 +385,16 @@ while true; do sleep 1; done
 """
     write_executable(env_prefix / "bin" / "python", server_source)
     command_log = tmp_path / "commands.log"
+    write_executable(
+        fake_bin / "file",
+        """
+if [[ "${@: -1}" == "$FAKE_WEBSHOP_PYTHON" ]]; then
+  printf '%s\n' "${FAKE_SERVER_PYTHON_MIME:-application/x-mach-binary}"
+else
+  exec /usr/bin/file "$@"
+fi
+""",
+    )
     write_executable(
         fake_bin / "git",
         r"""
@@ -367,6 +452,7 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SERVER_URL="http://127.0.0.1:3000",
+        FAKE_WEBSHOP_PYTHON=str(env_prefix / "bin" / "python"),
         FAKE_WEBSHOP_ROOT=str(webshop_root),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
         PLANU_PYTHON=str(fake_bin / "planu-python"),
@@ -412,6 +498,8 @@ def bootstrap_server_environment(
         """
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Flask")'* ]]; then
+  printf '2.1.2\n'
 elif [[ "$*" == *'version("Werkzeug")'* ]]; then
   printf '2.1.2\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
@@ -459,6 +547,7 @@ case "$*" in
 esac
 """,
     )
+    write_hashing_python_fake(fake_bin / "python3")
     write_executable(fake_bin / "conda", "exit 0\n")
     write_executable(
         fake_bin / "curl",
@@ -473,6 +562,7 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         FAKE_ENV_PREFIX=str(env_prefix),
         FAKE_IMPORT_LOG=str(tmp_path / "import.log"),
         FAKE_JAVA_VERSION_LINE=java_version_line,
+        FAKE_REAL_PYTHON=sys.executable,
         FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
@@ -1019,6 +1109,8 @@ def test_provenance_manifest_is_published_last_before_search_and_redacts_urls(
         "task_bounds",
         "model_id",
         "server_url",
+        "python_version",
+        "packages",
         "config_hash",
         "webshop_commit",
         "planu_git_commit",
@@ -1040,6 +1132,8 @@ def test_manifest_identity_mismatch_refuses_reuse_before_altering_artifacts(
         replacement = 999
     elif mutation == "task_bounds":
         replacement = {"start": 9, "end_exclusive": 10}
+    elif mutation == "packages":
+        replacement = {"numpy": "wrong-identity"}
     else:
         replacement = "wrong-identity"
     manifest["run_metadata"][mutation] = replacement
@@ -1236,14 +1330,20 @@ def test_manifest_reuse_does_not_recreate_missing_convenience_sidecars(
     assert not (tmp_path / "run_metadata.json").exists()
 
 
-def test_manifest_metadata_remains_authoritative_on_compatible_reuse(tmp_path):
+def test_manifest_reuse_rejects_changed_environment_before_artifact_changes(
+    tmp_path,
+):
     args = smoke_args(tmp_path)
     assert run(
         args,
         dependencies=DependencyHarness(tmp_path).dependencies(),
     ) == 0
     manifest_path = tmp_path / "run_manifest.json"
-    manifest_before = manifest_path.read_bytes()
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
     second_harness = DependencyHarness(tmp_path)
 
     def changed_environment_metadata(package_distributions):
@@ -1257,14 +1357,16 @@ def test_manifest_metadata_remains_authoritative_on_compatible_reuse(tmp_path):
         metadata_factory=changed_environment_metadata,
     )
 
-    assert run(args, dependencies=dependencies) == 0
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=dependencies)
 
-    result = json.loads(
-        (tmp_path / "tasks" / "fixed_1.json").read_text(encoding="utf-8")
-    )
-    assert manifest_path.read_bytes() == manifest_before
-    assert result["provenance"]["python_version"] == "3.9.6"
-    assert result["provenance"]["packages"]["numpy"] == "test-version"
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert second_harness.clients == []
 
 
 def test_output_directory_lock_refuses_concurrent_run_before_writes(
@@ -1822,8 +1924,13 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "https://github.com/princeton-nlp/WebShop.git" in bootstrap
     assert "BASH_SOURCE[0]" in bootstrap
     assert "python=3.8.13" in bootstrap
+    assert "requirements-webshop-server.txt" in bootstrap
+    assert "PIP_CONSTRAINT" in bootstrap
     assert "Werkzeug==2.1.2" in bootstrap
     assert "importlib.metadata" in bootstrap
+    assert "30a4765c3a327af72d9a9a95a6b2486d516f0fa1d3ecd83681901ce82a21b269" in bootstrap
+    assert "f88a36314a397b53b3d9c3fa5878e5f7b26d35019a51ec83fbedeca61a948f6f" in bootstrap
+    assert "cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3" in bootstrap
     assert "setup.sh -d small" in bootstrap
     assert "checkout --detach" in bootstrap
     assert "rev-parse --show-toplevel" in bootstrap
@@ -1837,6 +1944,12 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "BASH_SOURCE[0]" in smoke
     assert "WEBSHOP_ROOT" in smoke
     assert "WEBSHOP_URL" in smoke
+    assert "server_runtime.json" in smoke
+    assert "platform.python_version" in smoke
+    assert 'version("Flask")' in smoke
+    assert 'version("Werkzeug")' in smoke
+    assert "environment_sha256" in smoke
+    assert "os.replace" in smoke
     assert "http://127.0.0.1:3000/fixed_1" in smoke
     assert '"-m", "web_agent_site.app", "--log", "--attrs"' in smoke
     assert "authoritative WebShop smoke is local-only" in smoke
@@ -2144,6 +2257,27 @@ esac
     assert "index" in completed.stderr.lower()
 
 
+def test_webshop_bootstrap_rejects_wrong_small_data_digest(tmp_path):
+    environment, _, _, _, server_env_log = bootstrap_server_environment(
+        tmp_path
+    )
+    environment["FAKE_DATA_SHA_MISMATCH"] = "items_ins_v2_1000.json"
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "SHA-256" in completed.stderr
+    assert "items_ins_v2_1000.json" in completed.stderr
+    assert not server_env_log.exists()
+
+
 @pytest.mark.parametrize(
     "java_version_line",
     [
@@ -2201,6 +2335,10 @@ def test_webshop_fresh_bootstrap_installs_and_exports_java_before_setup(
     write_executable(
         webshop_root / "setup.sh",
         """
+[[ "${PIP_CONSTRAINT:-}" == */requirements-webshop-server.txt ]] || {
+  printf 'setup missing PIP_CONSTRAINT\n' >&2
+  exit 29
+}
 werkzeug="$("$FAKE_ENV_PREFIX/bin/python" -c \
   'from importlib.metadata import version; print(version("Werkzeug"))')"
 [[ "$werkzeug" == "2.1.2" ]] || {
@@ -2266,6 +2404,8 @@ if [[ "$command" == "create" ]]; then
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Flask")'* ]]; then
+  printf '2.1.2\n'
 elif [[ "$*" == *'version("Werkzeug")'* ]]; then
   printf 'python werkzeug\n' >> "$FAKE_EVENT_LOG"
   [[ -s "$FAKE_WERKZEUG_VERSION_FILE" ]] || exit 61
@@ -2317,6 +2457,7 @@ elif [[ "$command" == "run" ]]; then
 fi
 """,
     )
+    write_hashing_python_fake(fake_bin / "python3")
     write_executable(
         fake_bin / "curl",
         """
@@ -2328,6 +2469,7 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         fake_bin,
         FAKE_ENV_PREFIX=str(env_prefix),
         FAKE_EVENT_LOG=str(event_log),
+        FAKE_REAL_PYTHON=sys.executable,
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_WERKZEUG_VERSION_FILE=str(tmp_path / "werkzeug-version"),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
@@ -2479,6 +2621,8 @@ EOF
 #!/usr/bin/env bash
 if [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
+elif [[ "$*" == *'version("Flask")'* ]]; then
+  printf '2.1.2\n'
 elif [[ "$*" == *'version("Werkzeug")'* ]]; then
   printf '2.1.2\n'
 elif [[ "$*" == *"import web_agent_site.app"* ]]; then
@@ -2497,6 +2641,7 @@ elif [[ "${1:-}" == "run" ]]; then
 fi
 """,
     )
+    write_hashing_python_fake(fake_bin / "python3")
     write_executable(
         fake_bin / "curl",
         """
@@ -2508,6 +2653,7 @@ kill -0 "$(tail -n 1 "$FAKE_SERVER_PID_LOG")" 2>/dev/null
     environment = script_environment(
         fake_bin,
         FAKE_CONDA_LOG=str(conda_log),
+        FAKE_REAL_PYTHON=sys.executable,
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SETUP_LOG=str(setup_log),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
@@ -2583,6 +2729,78 @@ def test_webshop_smoke_rejects_external_server_even_with_asserted_commit(
     assert not command_log.exists()
 
 
+def test_webshop_smoke_rejects_bash_masquerading_as_server_python(tmp_path):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path
+    )
+    fake_python = Path(environment["WEBSHOP_ENV_PREFIX"]) / "bin" / "python"
+    environment["FAKE_SERVER_PYTHON_MIME"] = "text/x-shellscript"
+    write_executable(
+        fake_python,
+        """
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'Python 3.8.13\n'
+  exit 0
+fi
+printf '%s\n' "$$" > "$FAKE_SERVER_PID_LOG"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+""",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "Python" in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    ("variable", "version", "message"),
+    [
+        ("FAKE_SERVER_PYTHON_VERSION", "3.8.12", "Python version"),
+        ("FAKE_SERVER_FLASK_VERSION", "2.1.1", "Flask version"),
+        ("FAKE_SERVER_WERKZEUG_VERSION", "2.1.1", "Werkzeug version"),
+    ],
+)
+def test_webshop_smoke_rejects_wrong_server_runtime_before_start(
+    tmp_path,
+    variable,
+    version,
+    message,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path
+    )
+    environment[variable] = version
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
 @pytest.mark.parametrize(
     "java_version_line",
     [
@@ -2615,6 +2833,21 @@ def test_webshop_smoke_starts_pinned_local_checkout_and_verifies_artifacts(
     assert "--task-start-index 1 --task-end-index 2" in commands
     assert '"http_transition_count": 3' in completed.stdout
     assert '"quantile_backup_count": 1' in completed.stdout
+    runtime = json.loads(
+        (tmp_path / "run" / "server_runtime.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert runtime["python_version"] == "3.8.13"
+    assert runtime["flask_version"] == "2.1.2"
+    assert runtime["werkzeug_version"] == "2.1.2"
+    assert runtime["webshop_commit"] == WEBSHOP_COMMIT
+    assert runtime["java_version"].startswith(
+        ("openjdk version \"11.", "java version \"11.")
+    )
+    assert runtime["packages"]["flask"] == "2.1.2"
+    assert runtime["packages"]["werkzeug"] == "2.1.2"
+    assert len(runtime["environment_sha256"]) == 64
     java_home = (
         Path(environment["WEBSHOP_ENV_PREFIX"]).resolve() / "lib" / "jvm"
     )
@@ -2804,6 +3037,8 @@ def test_webshop_smoke_kills_term_resistant_process_group(tmp_path):
         ("missing_observation", "keys mismatch"),
         ("reward_mismatch", "terminal reward"),
         ("results_mismatch", "consolidated results"),
+        ("server_runtime_wrong_hash", "server runtime environment hash"),
+        ("server_runtime_wrong_flask", "server runtime Flask version"),
     ],
 )
 def test_webshop_smoke_rejects_tampered_authoritative_artifacts(

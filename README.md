@@ -128,7 +128,8 @@ python -m pip install --no-deps -e virtual-home
 including the compatible Gym/NumPy/DI-engine/Werkzeug combination, the tested
 OpenAI SDK used by model-backed WebShop, and `easydict` required by RND. The
 benchmark packages are installed with `--no-deps` so they cannot replace these
-pins.
+pins. The lock now contains 144 exact pins: the prior 143 resolved
+distributions plus the explicit build-tool pin `setuptools==66.1.1`.
 
 Prepare the external PlanBench checkout used by BlockWorld:
 
@@ -285,7 +286,8 @@ broken entrypoint.
 WebShop has two isolated processes:
 
 - PlanU client: the Python 3.9 `.venv`.
-- Official WebShop server: Python 3.8.13, Java 11, Flask, spaCy, and Pyserini.
+- Official WebShop server: Python 3.8.13, Java 11, Flask 2.1.2,
+  Werkzeug 2.1.2, spaCy, and Pyserini.
 
 The server is pinned to
 `princeton-nlp/WebShop@64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd`.
@@ -303,10 +305,13 @@ bash scripts/bootstrap_webshop.sh
 ```
 
 The bootstrap clones and pins the official repository, creates Python 3.8.13,
-installs and verifies `Werkzeug==2.1.2` before the upstream Flask 2.1.2 setup,
-downloads the small 1000-product dataset, builds the Lucene index, and checks
-that the server starts. The checkout must remain clean; generated data,
-indexes, and the isolated environment are excluded from source validation.
+sets `PIP_CONSTRAINT` to the committed
+`requirements-webshop-server.txt`, installs the exact direct server
+dependencies, downloads the small 1000-product dataset, verifies all three
+documented SHA-256 values before accepting the derived Lucene index, and
+checks that the server starts. The checkout must remain clean; generated
+data, indexes, and the isolated environment are excluded from source
+validation.
 
 On macOS arm64, export the Conda OpenJDK paths before bootstrap and smoke:
 The relevant variables are `JAVA_HOME`, `JVM_PATH`, `PATH`,
@@ -388,8 +393,12 @@ cd -
 
 The `scripts/smoke_webshop.sh` command starts the pinned official server, runs
 one PlanU task, validates the real HTTP trajectory and one quantile backup,
-checks output provenance, and stops the server. Set `PLANU_PYTHON` to the
-Python 3.9 executable used by the PlanU client:
+checks output provenance, and stops the server. Before startup it executes
+`WEBSHOP_PYTHON` and requires exactly Python 3.8.13, Flask 2.1.2, and
+Werkzeug 2.1.2. It atomically records `server_runtime.json` with those
+versions, the Java 11 version string, WebShop commit, complete normalized
+server package mapping, and deterministic environment SHA-256. Set
+`PLANU_PYTHON` to the Python 3.9 executable used by the PlanU client:
 
 ```bash
 source .venv/bin/activate
@@ -406,7 +415,9 @@ bash scripts/smoke_webshop.sh
 Conda environment, and `WEBSHOP_PYTHON` can override the server interpreter.
 `PLANU_PYTHON` selects the Python 3.9 client. `WEBSHOP_URL` defaults to the
 local server; authoritative smoke rejects non-local endpoints. `RUN_ROOT` is
-optional and otherwise a unique temporary output directory is created.
+optional and otherwise a unique temporary output directory is created. The
+final artifact validator independently verifies `server_runtime.json` and its
+environment SHA-256.
 
 The authoritative smoke evidence currently covers only `fixed_1`, using the
 scripted provider against the pinned local official server. It exits `0` and
@@ -461,7 +472,9 @@ python -m planu_core.webshop.runner \
 `bash webshop/planu.sh` is the compatibility launcher for the same reference
 profile. `OPENAI_API_KEY` supplies credentials and `OPENAI_BASE_URL` selects
 the compatible model endpoint. Credentials are read only from environment
-variables and are not written to logs or provenance.
+variables and are not written to logs or provenance. Historical credentials
+in Git history are intentionally outside this change and must be rotated in
+the external provider; the repository history is not rewritten.
 
 ## Configuration Scope
 
@@ -490,6 +503,7 @@ WebShop writes:
 
 ```text
 <output-dir>/
+  server_runtime.json
   run_manifest.json
   effective_config.json
   run_metadata.json
@@ -499,8 +513,11 @@ WebShop writes:
 
 WebShop provenance includes the PlanU commit, pinned server commit, sanitized
 server URL, config hash, model identifier, seed, task bounds, Python version,
-and dependency versions. Reusing an output directory with incompatible
-provenance is rejected.
+and the full PlanU dependency mapping. These runtime fields are immutable run
+identity, so a changed Python or package environment is rejected before task
+execution or artifact writes. The authoritative smoke additionally records
+the server runtime versions, Java string, complete package mapping, and
+environment hash in `server_runtime.json`.
 
 ## Reproduction Scope
 

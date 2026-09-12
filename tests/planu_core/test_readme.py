@@ -16,6 +16,9 @@ EXPERIMENT_REQUIREMENTS = (
     REPOSITORY_ROOT / "requirements-experiments.txt"
 )
 EXPERIMENT_LOCK = REPOSITORY_ROOT / "requirements-experiments-lock.txt"
+WEBSHOP_SERVER_REQUIREMENTS = (
+    REPOSITORY_ROOT / "requirements-webshop-server.txt"
+)
 
 
 def _readme():
@@ -203,9 +206,12 @@ def test_readme_documents_webshop_setup_and_real_smoke():
 
     for term in (
         "Python 3.8.13",
+        "Flask 2.1.2",
+        "Werkzeug 2.1.2",
         "Java 11",
         "Pyserini",
         "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd",
+        "`requirements-webshop-server.txt`",
         "`scripts/bootstrap_webshop.sh`",
         "`scripts/smoke_webshop.sh`",
         "`JAVA_HOME`",
@@ -218,6 +224,8 @@ def test_readme_documents_webshop_setup_and_real_smoke():
         "`RUN_ROOT`",
         "`OPENAI_API_KEY`",
         "`OPENAI_BASE_URL`",
+        "`server_runtime.json`",
+        "environment SHA-256",
         "http_transition_count",
         "quantile_backup_count",
         "search[product]",
@@ -335,6 +343,7 @@ def test_experiment_validation_documents_stable_webshop_evidence_schema():
         "`<run-root>/results.jsonl`",
         "`<run-root>/tasks/fixed_1.json`",
         "`<run-root>/webshop-server.log`",
+        "`<run-root>/server_runtime.json`",
         "`RUN_ROOT` is optional",
         "exit `0`",
         "`model_id: scripted`",
@@ -364,10 +373,64 @@ def test_experiment_lock_pins_resolved_transitive_dependencies():
         "pydantic==2.13.5",
         "pydantic_core==2.46.5",
         "scipy==1.13.1",
+        "setuptools==66.1.1",
         "typing-inspection==0.4.2",
         "wandb==0.12.16",
     ):
         assert requirement in requirements
+    assert len(requirements) == 144
+
+
+def test_docs_explain_experiment_lock_and_webshop_server_attestation():
+    readme = _normalize_whitespace(_readme())
+    validation = _normalize_whitespace(
+        EXPERIMENT_VALIDATION_PATH.read_text(encoding="utf-8")
+    )
+
+    for document in (readme, validation):
+        assert "144 exact pins" in document
+        assert "143 resolved distributions" in document
+        assert "`setuptools==66.1.1`" in document
+        assert "`server_runtime.json`" in document
+        assert "environment SHA-256" in document
+
+
+def test_webshop_server_requirements_exactly_pin_upstream_direct_dependencies():
+    requirements = {
+        line.strip()
+        for line in WEBSHOP_SERVER_REQUIREMENTS.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+    assert requirements == {
+        "beautifulsoup4==4.11.1",
+        "cleantext==1.1.4",
+        "env==0.1.0",
+        "Flask==2.1.2",
+        "gdown==5.2.0",
+        "gradio==3.50.2",
+        "gym==0.24.0",
+        "numpy==1.22.4",
+        "pandas==1.4.2",
+        "pyserini==0.17.0",
+        "pytest==7.4.4",
+        "PyYAML==6.0",
+        "rank_bm25==0.2.2",
+        "requests==2.27.1",
+        "requests-mock==1.12.1",
+        "rich==12.4.4",
+        "scikit_learn==1.1.1",
+        "selenium==4.2.0",
+        "spacy==3.3.0",
+        "thefuzz==0.19.0",
+        "torch==1.11.0",
+        "tqdm==4.64.0",
+        "train==0.0.5",
+        "transformers==4.19.2",
+        "Werkzeug==2.1.2",
+    }
 
 
 def test_experiment_requirements_pin_compatible_runtime_versions():

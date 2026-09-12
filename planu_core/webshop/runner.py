@@ -57,6 +57,8 @@ RUN_IDENTITY_FIELDS = (
     "git_commit",
     "planu_git_commit",
     "webshop_commit",
+    "python_version",
+    "packages",
     "config_hash",
 )
 
