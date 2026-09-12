@@ -20,7 +20,6 @@ import logging
 import random
 from utils import sample_latency_check
 completion_tokens = prompt_tokens = 0
-openai.api_key = "sk-4d2efba2e58942dc8f595cd89ad2bca3"
 
 import requests
 from bs4 import BeautifulSoup

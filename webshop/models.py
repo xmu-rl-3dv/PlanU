@@ -8,34 +8,19 @@ import copy
 completion_tokens = prompt_tokens = 0
 MAX_TOKENS = 15000
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2-medium')
-openai.api_key = "sk-4d2efba2e58942dc8f595cd89ad2bca3"
-openai.api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = os.getenv("OPENAI_API_KEY", "")
-api_key = "sk-4d2efba2e58942dc8f595cd89ad2bca3" 
-client = OpenAI(
-    # 若没有配置环境变量，请用阿里云百炼API Key将下行替换为：api_key="sk-xxx",
-    api_key="sk-4d2efba2e58942dc8f595cd89ad2bca3",
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-)
-# api_key = "https://api.siliconflow.cn/v1/chat/completions"
-# openai.api_base = "https://api.siliconflow.cn/v1/chat/completions"
-# openai.api_key = "sk-oqanbtrngckycrtyomzzytnwxeyxvgofanxkxcdnkyoiscnv"
-# client = OpenAI(
-#     # 若没有配置环境变量，请用阿里云百炼API Key将下行替换为：api_key="sk-xxx",
-#     api_key="sk-oqanbtrngckycrtyomzzytnwxeyxvgofanxkxcdnkyoiscnv",
-#     base_url="https://api.siliconflow.cn/v1/chat/completions",
-# )
+DEFAULT_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-# Replace with your actual API key
-if api_key != "":
-    openai.api_key = api_key
-else:
-    print("Warning: OPENAI_API_KEY is not set")
-    
-api_base = os.getenv("OPENAI_API_BASE", "")
-if api_base != "":
-    print("Warning: OPENAI_API_BASE is set to {}".format(api_base))
-    openai.api_base = api_base
+
+def require_api_key() -> str:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for the configured WebShop backend")
+    return api_key
+
+
+def configured_api_base() -> str:
+    return os.environ.get("OPENAI_API_BASE", "").strip() or DEFAULT_API_BASE
+
 
 @backoff.on_exception(backoff.expo, OpenAIError)
 def completions_with_backoff(**kwargs_origin):
@@ -48,12 +33,16 @@ def completions_with_backoff(**kwargs_origin):
     # for i in range(n):
     #     kwargs['n'] = 1  # Ensure we only request one completion at a time
     #     completion.append(client.chat.completions.create(**kwargs))
+    client = OpenAI(api_key=require_api_key(), base_url=configured_api_base())
     completion= client.chat.completions.create(**kwargs)
     # print(completion.choices[0].message.content[:40])
     # input('...')
     return completion
 
+
 def gpt3(prompt, model="text-davinci-002", temperature=1.0, max_tokens=100, n=1, stop=None) -> list:
+    openai.api_key = require_api_key()
+    openai.api_base = configured_api_base()
     outputs = []
     for _ in range(n):
         response = openai.Completion.create(
