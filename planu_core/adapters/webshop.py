@@ -19,7 +19,7 @@ _BACK_TO_SEARCH = "back to search"
 _NEXT_PAGE = "next >"
 _PREVIOUS_PAGE = "< prev"
 _END_BUTTON = "buy now"
-_SUBPAGES = frozenset(("description", "features", "reviews"))
+_SUBPAGES = frozenset(("description", "features", "reviews", "attributes"))
 _INVALID_OBSERVATION = "Invalid action!"
 _THINK_OBSERVATION = "OK."
 

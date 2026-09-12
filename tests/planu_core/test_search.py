@@ -10,6 +10,7 @@ from planu_core import PlanUConfig, SelectionSchedule
 from planu_core.adapters.blockworld import BlockWorldAdapter
 from planu_core.adapters.overcooked import OvercookedAdapter
 from planu_core.adapters.virtualhome import VirtualHomeAdapter
+from planu_core.adapters.webshop import WebShopAdapter
 from planu_core.interfaces import (
     ActionCandidate,
     EnvironmentAdapter,
@@ -18,6 +19,10 @@ from planu_core.interfaces import (
 )
 from planu_core.search import PlanUSearch, TrajectoryResult
 from tests.planu_core.fakes import FakeAdapter, UniformScorer
+from tests.planu_core.webshop_fakes import (
+    DeterministicWebShopActionProvider,
+    FakeWebShopClient,
+)
 
 
 class TerminalAdapter(FakeAdapter):
@@ -594,6 +599,24 @@ def test_max_depth_exhaustion_marks_final_state_and_result_truncated():
     assert result.state_path[-1].truncated is True
     assert result.state_path[-1].truncation_reason == "max_depth"
     assert result.truncation_reason == "max_depth"
+
+
+def test_webshop_depth_exhaustion_is_truncated_not_terminated():
+    search = PlanUSearch(
+        WebShopAdapter(FakeWebShopClient(), "session-depth"),
+        UniformScorer(),
+        PlanUConfig(max_depth=1),
+        action_provider=DeterministicWebShopActionProvider(),
+    )
+
+    result = search.run_iteration(0, np.random.default_rng(5))
+
+    assert result.actions == [("search", "red mug")]
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.truncation_reason == "max_depth"
+    assert result.state_path[-1].terminated is False
+    assert result.state_path[-1].truncated is True
 
 
 def test_terminal_root_returns_empty_without_listing_or_scoring_actions(

@@ -32,7 +32,7 @@ SEARCH_PAGE = WebShopPage(
 ITEM_PAGE = WebShopPage(
     observation=(
         "[Back to Search]\n[< Prev]\nColor [Red][Blue]\n"
-        "[Description]\n[Features]\n[Reviews]\n[Buy Now]"
+        "[Description]\n[Features]\n[Reviews]\n[Attributes]\n[Buy Now]"
     ),
     buttons=(
         "Back to Search",
@@ -40,6 +40,7 @@ ITEM_PAGE = WebShopPage(
         "Description",
         "Features",
         "Reviews",
+        "Attributes",
         "Buy Now",
     ),
     option_types=(("Red", "Color"), ("Blue", "Color")),
@@ -292,6 +293,7 @@ def test_completion_queries_return_exact_runtime_flags(
                 "click[Description]",
                 "click[Features]",
                 "click[Reviews]",
+                "click[Attributes]",
                 "click[Buy Now]",
                 "click[Red]",
                 "click[Blue]",
@@ -436,7 +438,10 @@ def test_prev_reverses_search_item_and_item_sub_navigation(
     assert result.state.runtime.subpage == ""
 
 
-@pytest.mark.parametrize("subpage", ["Description", "Features", "Reviews"])
+@pytest.mark.parametrize(
+    "subpage",
+    ["Description", "Features", "Reviews", "Attributes"],
+)
 def test_item_detail_buttons_open_the_matching_subpage(subpage):
     client = FakeClient()
     adapter = WebShopAdapter(client, "session-7")
@@ -449,6 +454,8 @@ def test_item_detail_buttons_open_the_matching_subpage(subpage):
 
     assert result.state.runtime.page_type == "item_sub"
     assert result.state.runtime.subpage == subpage
+    assert result.terminated is False
+    assert result.truncated is False
     assert client.calls[-1][0] == "item_sub"
     assert client.calls[-1][2]["subpage"] == subpage
 
