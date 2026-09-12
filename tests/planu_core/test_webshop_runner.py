@@ -555,13 +555,17 @@ def test_provenance_manifest_is_published_last_before_search_and_redacts_urls(
 @pytest.mark.parametrize(
     "mutation",
     [
-        "effective_config",
+        "seed",
+        "task_bounds",
+        "model_id",
+        "server_url",
         "config_hash",
         "webshop_commit",
         "planu_git_commit",
+        "git_commit",
     ],
 )
-def test_manifest_mismatch_refuses_reuse_before_altering_artifacts(
+def test_manifest_identity_mismatch_refuses_reuse_before_altering_artifacts(
     tmp_path,
     mutation,
 ):
@@ -571,16 +575,103 @@ def test_manifest_mismatch_refuses_reuse_before_altering_artifacts(
 
     manifest_path = tmp_path / "run_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if mutation == "effective_config":
-        manifest["effective_config"]["args"]["seed"] = 999
-    elif mutation == "config_hash":
-        manifest["run_metadata"]["config_hash"] = "wrong-hash"
+    metadata_path = tmp_path / "run_metadata.json"
+    if mutation == "seed":
+        replacement = 999
+    elif mutation == "task_bounds":
+        replacement = {"start": 9, "end_exclusive": 10}
     else:
-        manifest["run_metadata"][mutation] = "wrong-source"
+        replacement = "wrong-identity"
+    manifest["run_metadata"][mutation] = replacement
+    metadata_path.write_text(
+        json.dumps(manifest["run_metadata"], sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    second_harness = DependencyHarness(tmp_path)
+
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=second_harness.dependencies())
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert second_harness.clients == []
+
+
+def test_manifest_effective_config_mismatch_refuses_reuse_before_artifact_changes(
+    tmp_path,
+):
+    first_harness = DependencyHarness(tmp_path)
+    args = smoke_args(tmp_path)
+    assert run(args, dependencies=first_harness.dependencies()) == 0
+
+    manifest_path = tmp_path / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["effective_config"]["args"]["seed"] = 999
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    second_harness = DependencyHarness(tmp_path)
+
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=second_harness.dependencies())
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert second_harness.clients == []
+
+
+@pytest.mark.parametrize(
+    ("sidecar_name", "manifest_key"),
+    [
+        ("effective_config.json", "effective_config"),
+        ("run_metadata.json", "run_metadata"),
+    ],
+)
+def test_manifest_reuse_rejects_mismatched_present_sidecar(
+    tmp_path,
+    sidecar_name,
+    manifest_key,
+):
+    args = smoke_args(tmp_path)
+    assert run(
+        args,
+        dependencies=DependencyHarness(tmp_path).dependencies(),
+    ) == 0
+
+    sidecar_path = tmp_path / sidecar_name
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["unexpected"] = "different-from-manifest"
+    sidecar_path.write_text(
+        json.dumps(sidecar, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest = json.loads(
+        (tmp_path / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert sidecar != manifest[manifest_key]
     before = {
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*")

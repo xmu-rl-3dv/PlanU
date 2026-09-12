@@ -49,6 +49,16 @@ WEBSHOP_DISTRIBUTIONS = {
 RUN_MANIFEST = "run_manifest.json"
 EFFECTIVE_CONFIG_SIDECAR = "effective_config.json"
 RUN_METADATA_SIDECAR = "run_metadata.json"
+RUN_IDENTITY_FIELDS = (
+    "seed",
+    "task_bounds",
+    "model_id",
+    "server_url",
+    "git_commit",
+    "planu_git_commit",
+    "webshop_commit",
+    "config_hash",
+)
 
 
 class WebShopRunnerError(RuntimeError):
@@ -408,14 +418,13 @@ def _validate_manifest(
         raise ValueError("run manifest metadata is invalid")
 
     expected_hash = config_hash(effective_config)
-    if (
-        run_metadata.get("config_hash") != expected_hash
-        or stored_metadata.get("config_hash") != expected_hash
-    ):
+    if run_metadata.get("config_hash") != expected_hash:
         raise ValueError("run manifest config hash mismatch")
-    for field in ("planu_git_commit", "webshop_commit"):
+    for field in RUN_IDENTITY_FIELDS:
         if stored_metadata.get(field) != run_metadata.get(field):
-            raise ValueError("run manifest pinned source mismatch")
+            raise ValueError(
+                "run manifest identity mismatch for {}".format(field)
+            )
 
 
 def _prepare_run_artifacts(
@@ -438,6 +447,19 @@ def _prepare_run_artifacts(
             effective_config,
             run_metadata,
         )
+        for sidecar_path, manifest_key in (
+            (effective_path, "effective_config"),
+            (metadata_path, "run_metadata"),
+        ):
+            if (
+                sidecar_path.exists()
+                and _load_json_object(sidecar_path) != manifest[manifest_key]
+            ):
+                raise ValueError(
+                    "{} does not match run manifest".format(
+                        sidecar_path.name
+                    )
+                )
         return manifest["run_metadata"]
 
     has_effective = effective_path.exists()
