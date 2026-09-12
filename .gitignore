@@ -1,2 +1,4 @@
 webshop/logs/
 *.log
+__pycache__/
+*.pyc
