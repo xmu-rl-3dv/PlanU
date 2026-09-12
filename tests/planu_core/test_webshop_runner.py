@@ -780,6 +780,93 @@ def test_dependency_supplied_runner_errors_are_not_trusted(
     assert secret not in captured.err
 
 
+def test_sanitized_error_search_ignores_public_error_cycles():
+    error = WebShopRunnerError("external-secret")
+    error.__cause__ = error
+
+    assert webshop_runner._find_sanitized_error(error) is None
+
+
+def test_cleanup_failure_preserves_safe_task_context(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    task_secret = "task-failure-secret"
+    cleanup_secret = "cleanup-failure-secret"
+
+    def dependency_factory():
+        harness = DependencyHarness(tmp_path)
+        dependencies = harness.dependencies()
+        search = FakeSearch([], tmp_path)
+
+        def fail_task(*args, **kwargs):
+            del args, kwargs
+            raise ConnectionError(task_secret)
+
+        def fail_close():
+            raise OSError(cleanup_secret)
+
+        search.run_iteration = fail_task
+        harness.client.close = fail_close
+        return replace(
+            dependencies,
+            search_factory=lambda *args, **kwargs: search,
+        )
+
+    args = smoke_args(
+        tmp_path,
+        "--task-start-index",
+        "7",
+        "--task-end-index",
+        "8",
+    )
+    with pytest.raises(WebShopRunnerError) as raised:
+        run(args, dependencies=dependency_factory())
+
+    message = str(raised.value)
+    formatted = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert "fixed_7" in message
+    assert "ConnectionError" in message
+    assert "OSError" in message
+    assert raised.value.__cause__ is None
+    for secret in (task_secret, cleanup_secret):
+        assert secret not in message
+        assert secret not in formatted
+
+    monkeypatch.setattr(
+        webshop_runner,
+        "RunnerDependencies",
+        dependency_factory,
+    )
+    exit_code = webshop_runner.main(
+        [
+            "--smoke",
+            "--task-start-index",
+            "7",
+            "--task-end-index",
+            "8",
+            "--iterations",
+            "1",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err.strip() == message
+    for secret in (task_secret, cleanup_secret):
+        assert secret not in captured.err
+
+
 def test_openai_backend_close_releases_lazy_client_once():
     client = Closeable()
     backend = OpenAICompatibleBackend(model="model")

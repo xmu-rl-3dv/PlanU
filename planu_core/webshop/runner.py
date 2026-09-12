@@ -62,6 +62,25 @@ def _safe_failure_summary(error: Exception, context: str) -> str:
     )
 
 
+def _find_sanitized_error(
+    error: BaseException,
+) -> Optional[_SanitizedWebShopRunnerError]:
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if type(current) is _SanitizedWebShopRunnerError:
+            return current
+        for linked in (current.__cause__, current.__context__):
+            if linked is not None:
+                pending.append(linked)
+    return None
+
+
 class ScriptedWebShopActionScorer:
     """Credential-free deterministic scorer used by real-HTTP smoke runs."""
 
@@ -510,6 +529,14 @@ def run(
     except _SanitizedWebShopRunnerError:
         raise
     except Exception as error:
+        prior_error = _find_sanitized_error(error)
+        if prior_error is not None:
+            raise _SanitizedWebShopRunnerError(
+                "{}; cleanup failure ({})".format(
+                    str(prior_error),
+                    type(error).__name__,
+                )
+            ) from None
         raise _SanitizedWebShopRunnerError(
             _safe_failure_summary(error, "runner")
         ) from None
