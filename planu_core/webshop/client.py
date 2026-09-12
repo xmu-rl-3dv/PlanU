@@ -129,15 +129,6 @@ def parse_page(html: str) -> WebShopPage:
     reward = _parse_reward(visible_texts)
     page_kind = _page_kind(soup, visible_texts)
 
-    if page_kind == "done":
-        reward_text = visible_texts[
-            visible_texts.index(_REWARD_MARKER) + 1
-        ]
-        return WebShopPage(
-            observation="{}: {}".format(_REWARD_MARKER, reward_text),
-            reward=reward,
-        )
-
     observation_parts = []
     buttons = []
     asins = []
@@ -184,8 +175,15 @@ def parse_page(html: str) -> WebShopPage:
 
         distance_from_product += 1
 
+    observation = "".join(observation_parts)
+    if page_kind == "done":
+        reward_text = visible_texts[
+            visible_texts.index(_REWARD_MARKER) + 1
+        ]
+        observation = "{}: {}".format(_REWARD_MARKER, reward_text)
+
     return WebShopPage(
-        observation="".join(observation_parts),
+        observation=observation,
         buttons=tuple(buttons),
         asins=tuple(asins),
         option_types=tuple(option_types),

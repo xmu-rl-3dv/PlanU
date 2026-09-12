@@ -179,6 +179,29 @@ def test_parse_done_page_reads_value_after_reward_marker():
     assert page.observation == "Your score (min 0.0, max 1.0): 0.750"
 
 
+def test_parse_done_page_retains_coexisting_structured_controls():
+    page = parse_page(
+        """
+        <body>
+          <div>Instruction:</div><div>Find the red product</div>
+          <button>Back to Search</button>
+          <a class="product-link" href="/item/ASIN-1">ASIN-1</a>
+          <h4>Color</h4><label>red</label>
+          <h3 id="reward">
+            Your score (min 0.0, max 1.0)
+            <pre>0.75</pre>
+          </h3>
+        </body>
+        """
+    )
+
+    assert page.buttons == ("Back to Search",)
+    assert page.asins == ("ASIN-1",)
+    assert page.option_types == (("red", "Color"),)
+    assert page.reward == 0.75
+    assert page.observation == "Your score (min 0.0, max 1.0): 0.75"
+
+
 def test_parse_page_defaults_reward_to_zero_without_marker():
     assert parse_page("<body><p>ordinary page</p></body>").reward == 0.0
 
