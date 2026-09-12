@@ -12,6 +12,7 @@ def _tracked_files():
     output = subprocess.check_output(
         ["git", "ls-files", "-z"],
         cwd=str(REPO_ROOT),
+        timeout=30,
     )
     return {
         Path(path.decode("utf-8"))

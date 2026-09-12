@@ -35,6 +35,7 @@ def test_tracked_blockworld_annotations_are_python39_runtime_safe():
         ["git", "ls-files", "blockworld/**/*.py"],
         cwd=str(REPO_ROOT),
         text=True,
+        timeout=30,
     ).splitlines()
     unsafe = []
     for relative_path in tracked:
