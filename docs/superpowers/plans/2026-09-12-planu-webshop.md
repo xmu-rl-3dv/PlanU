@@ -503,9 +503,10 @@ Implement `WebShopHttpClient.fetch()` with the five official routes, URL
 encoding for every path component, `requests.Session.get(..., timeout=...)`,
 `raise_for_status()`, and a contextual `WebShopHttpError`.
 
-Add `beautifulsoup4==4.13.5` to the direct and locked experiment
-requirements. Add a `webshop` extra containing `beautifulsoup4` and `openai`
-to `setup.py`.
+Add `beautifulsoup4==4.11.1` to the direct and locked experiment
+requirements. This matches the pinned official WebShop upstream requirements;
+the approved design does not specify a Beautiful Soup version. Add a `webshop`
+extra containing `beautifulsoup4` and `openai` to `setup.py`.
 
 - [ ] **Step 4: Run focused tests and dependency validation**
 

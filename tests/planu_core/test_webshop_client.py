@@ -204,15 +204,15 @@ def test_parse_page_rejects_missing_or_malformed_reward_contextually(html):
         ("init", {}, "/session%20%2F%3F"),
         (
             "search",
-            {"query": "red shoes/50%", "page": 2},
+            {"query_string": "red shoes/50%", "page_num": 2},
             "/search_results/session%20%2F%3F/red%20shoes%2F50%25/2",
         ),
         (
             "item",
             {
                 "asin": "A/B ?",
-                "query": "red shoes",
-                "page": 3,
+                "query_string": "red shoes",
+                "page_num": 3,
                 "options": {"size": "M/L", "color": "red blue"},
             },
             (
@@ -225,8 +225,8 @@ def test_parse_page_rejects_missing_or_malformed_reward_contextually(html):
             "item_sub",
             {
                 "asin": "A/B ?",
-                "query": "red shoes",
-                "page": 3,
+                "query_string": "red shoes",
+                "page_num": 3,
                 "subpage": "Reviews / Q&A",
                 "options": {"color": "red blue"},
             },
@@ -266,6 +266,78 @@ def test_fetch_builds_official_encoded_routes(
     ]
 
 
+def test_fetch_builds_search_route_with_official_keyword_names():
+    session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=session,
+    )
+
+    client.fetch(
+        page_type="search",
+        session_id="fixed / 1",
+        query_string="red mug/large",
+        page_num=4,
+    )
+
+    assert session.calls == [
+        (
+            "https://shop.example.test/search_results/"
+            "fixed%20%2F%201/red%20mug%2Flarge/4",
+            (3.05, 30.0),
+        )
+    ]
+
+
+def test_fetch_maps_end_page_type_to_official_done_route():
+    session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=session,
+    )
+
+    client.fetch(
+        page_type="end",
+        session_id="fixed / 1",
+        asin="A/B",
+        options={"color": "red blue"},
+    )
+
+    assert session.calls == [
+        (
+            "https://shop.example.test/done/fixed%20%2F%201/A%2FB/"
+            "%7B%22color%22%3A%22red%20blue%22%7D",
+            (3.05, 30.0),
+        )
+    ]
+
+
+def test_fetch_preserves_positional_argument_order():
+    session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=session,
+    )
+
+    client.fetch(
+        "item_sub",
+        "session",
+        "red mug",
+        3,
+        "A1",
+        {"color": "red"},
+        "Reviews",
+    )
+
+    assert session.calls == [
+        (
+            "https://shop.example.test/item_sub_page/session/A1/"
+            "red%20mug/3/Reviews/%7B%22color%22%3A%22red%22%7D",
+            (3.05, 30.0),
+        )
+    ]
+
+
 def test_client_creation_does_not_make_a_request():
     session = FakeSession()
 
@@ -301,7 +373,12 @@ def test_fetch_wraps_transport_failure_with_route_context():
     )
 
     with pytest.raises(WebShopHttpError, match="search"):
-        client.fetch("search", "session", query="shoes", page=1)
+        client.fetch(
+            "search",
+            "session",
+            query_string="shoes",
+            page_num=1,
+        )
 
 
 def test_fetch_wraps_page_parse_failure_with_route_context():

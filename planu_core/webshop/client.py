@@ -246,46 +246,48 @@ class WebShopHttpClient:
     def _build_url(
         self,
         page_type: str,
-        session: str,
-        query: str,
-        page: int,
+        session_id: str,
+        query_string: str,
+        page_num: int,
         asin: str,
         options: Optional[Mapping[str, str]],
         subpage: str,
     ) -> str:
-        encoded_session = _encode_component(session)
+        encoded_session = _encode_component(session_id)
         encoded_options = _encode_component(_canonical_options(options))
+        done_route = (
+            "done",
+            encoded_session,
+            _encode_component(asin),
+            encoded_options,
+        )
         routes = {
             "init": (encoded_session,),
             "search": (
                 "search_results",
                 encoded_session,
-                _encode_component(query),
-                _encode_component(page),
+                _encode_component(query_string),
+                _encode_component(page_num),
             ),
             "item": (
                 "item_page",
                 encoded_session,
                 _encode_component(asin),
-                _encode_component(query),
-                _encode_component(page),
+                _encode_component(query_string),
+                _encode_component(page_num),
                 encoded_options,
             ),
             "item_sub": (
                 "item_sub_page",
                 encoded_session,
                 _encode_component(asin),
-                _encode_component(query),
-                _encode_component(page),
+                _encode_component(query_string),
+                _encode_component(page_num),
                 _encode_component(subpage),
                 encoded_options,
             ),
-            "done": (
-                "done",
-                encoded_session,
-                _encode_component(asin),
-                encoded_options,
-            ),
+            "end": done_route,
+            "done": done_route,
         }
         try:
             route = routes[page_type]
@@ -298,18 +300,18 @@ class WebShopHttpClient:
     def fetch(
         self,
         page_type: str,
-        session: str,
-        query: str = "",
-        page: int = 1,
+        session_id: str,
+        query_string: str = "",
+        page_num: int = 1,
         asin: str = "",
         options: Optional[Mapping[str, str]] = None,
         subpage: str = "",
     ) -> WebShopPage:
         url = self._build_url(
             page_type,
-            session,
-            query,
-            page,
+            session_id,
+            query_string,
+            page_num,
             asin,
             options,
             subpage,
