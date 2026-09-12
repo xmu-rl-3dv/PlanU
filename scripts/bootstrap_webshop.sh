@@ -4,6 +4,7 @@ set -euo pipefail
 SOURCE_URL="https://github.com/princeton-nlp/WebShop.git"
 COMMIT="64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
 WERKZEUG_REQUIREMENT="Werkzeug==2.1.2"
+SPACY_MODEL_REQUIREMENT="en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.3.0/en_core_web_sm-3.3.0-py3-none-any.whl#sha256=84d7d8059bfbf53c09b39139782f76cd6ac7064851e7799dcc685c06ebf5fd4f"
 ITEMS_SHUFFLE_SHA256="30a4765c3a327af72d9a9a95a6b2486d516f0fa1d3ecd83681901ce82a21b269"
 ITEMS_INS_SHA256="f88a36314a397b53b3d9c3fa5878e5f7b26d35019a51ec83fbedeca61a948f6f"
 ITEMS_HUMAN_SHA256="cf78667548a71786e1d9049c24b802e48e1084ad4bb021cae56ce1f6d96954a3"
@@ -128,8 +129,54 @@ verify_flask() {
   [[ "${version}" == "2.1.2" ]]
 }
 
+verify_locked_environment() {
+  "${ENV_PREFIX}/bin/python" -c '
+from importlib.metadata import distributions
+from pathlib import Path
+import re
+import sys
+
+expected = {}
+for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if "==" not in line:
+        raise SystemExit("server lock contains a non-exact requirement: " + line)
+    raw_name, version = line.split("==", 1)
+    name = re.sub(r"[-_.]+", "-", raw_name).lower()
+    expected[name] = version
+
+installed = {}
+for distribution in distributions():
+    raw_name = distribution.metadata.get("Name")
+    if not raw_name:
+        continue
+    name = re.sub(r"[-_.]+", "-", raw_name).lower()
+    prior = installed.get(name)
+    if prior is not None and prior != distribution.version:
+        raise SystemExit("conflicting installed distributions for " + name)
+    installed[name] = distribution.version
+
+mismatches = {
+    name: (version, installed.get(name))
+    for name, version in expected.items()
+    if installed.get(name) != version
+}
+if mismatches:
+    details = ", ".join(
+        "{} expected {} found {}".format(name, values[0], values[1])
+        for name, values in sorted(mismatches.items())
+    )
+    raise SystemExit("server lock mismatch: " + details)
+' "${SERVER_LOCK}"
+}
+
 verify_environment() {
-  verify_python_environment && verify_flask && verify_werkzeug
+  verify_python_environment &&
+    verify_flask &&
+    verify_werkzeug &&
+    verify_locked_environment
 }
 
 verify_data_file() {
@@ -256,6 +303,15 @@ PY
   cleanup
 }
 
+marker_matches_lock() {
+  [[ -f "${SETUP_MARKER}" ]] || return 1
+  [[ "$(tr -d '\r\n' <"${SETUP_MARKER}")" == "${LOCK_SHA256}" ]]
+}
+
+write_setup_marker() {
+  printf '%s\n' "${LOCK_SHA256}" >"${SETUP_MARKER}"
+}
+
 require_command python3
 require_command git
 require_command conda
@@ -266,10 +322,23 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
 ROOT="$(canonical_path "${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}")"
 ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX:-${ROOT}/.conda-planu}")"
-PIP_CONSTRAINT="${PROJECT_ROOT}/requirements-webshop-server.txt"
+DIRECT_REQUIREMENTS="${PROJECT_ROOT}/requirements-webshop-server.txt"
+SERVER_LOCK="${PROJECT_ROOT}/requirements-webshop-server-lock.txt"
+PIP_CONSTRAINT="${SERVER_LOCK}"
 SETUP_MARKER="${ENV_PREFIX}/.planu-webshop-small-${COMMIT}"
-[[ -f "${PIP_CONSTRAINT}" ]] ||
-  fail "server constraint file is missing: ${PIP_CONSTRAINT}"
+[[ -f "${DIRECT_REQUIREMENTS}" ]] ||
+  fail "server direct requirements file is missing: ${DIRECT_REQUIREMENTS}"
+[[ -f "${SERVER_LOCK}" ]] ||
+  fail "server lock file is missing: ${SERVER_LOCK}"
+LOCK_SHA256="$(
+  python3 - "${SERVER_LOCK}" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+)" || fail "could not hash server lock: ${SERVER_LOCK}"
 export PIP_CONSTRAINT
 
 case "${START_ATTEMPTS}" in
@@ -358,14 +427,27 @@ fi
 verify_python_environment && verify_werkzeug ||
   fail "Conda prefix must contain Python 3.8.13 and ${WERKZEUG_REQUIREMENT}: ${ENV_PREFIX}"
 
-if [[ -f "${SETUP_MARKER}" ]]; then
+if marker_matches_lock; then
   verify_small_setup ||
     fail "setup marker exists but required data or Lucene index artifacts are incomplete"
   verify_server_startup
 elif verify_small_setup; then
   verify_server_startup
-  touch "${SETUP_MARKER}"
+  write_setup_marker
 else
+  if ! "${ENV_PREFIX}/bin/python" -m pip install \
+    "pip==24.3.1" "packaging==26.2" "setuptools==68.2.2" \
+    "wheel==0.45.1" -c "${SERVER_LOCK}"; then
+    fail "locked server build-tool installation failed"
+  fi
+  if ! "${ENV_PREFIX}/bin/python" -m pip install \
+    -r "${DIRECT_REQUIREMENTS}" -c "${SERVER_LOCK}"; then
+    fail "locked direct server dependency installation failed"
+  fi
+  if ! "${ENV_PREFIX}/bin/python" -m pip install \
+    "${SPACY_MODEL_REQUIREMENT}" -c "${SERVER_LOCK}"; then
+    fail "locked spaCy server model installation failed"
+  fi
   (
     cd "${ROOT}"
     export CONDA_ALWAYS_YES=true
@@ -376,7 +458,7 @@ else
   verify_small_setup ||
     fail "upstream small setup finished without required data, Lucene index artifacts, or server module"
   verify_server_startup
-  touch "${SETUP_MARKER}"
+  write_setup_marker
 fi
 
 verify_clean_checkout

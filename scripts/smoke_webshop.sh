@@ -158,8 +158,10 @@ write_server_runtime_attestation() {
 import hashlib
 from importlib.metadata import distributions, version
 import json
+from pathlib import Path
 import platform
 import re
+import sys
 
 python_version = platform.python_version()
 flask_version = version("Flask")
@@ -182,6 +184,26 @@ for distribution in distributions():
         raise SystemExit("conflicting installed distributions for " + name)
     packages[name] = distribution.version
 packages = dict(sorted(packages.items()))
+expected = {}
+for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if "==" not in line:
+        raise SystemExit("server lock contains a non-exact requirement: " + line)
+    raw_name, expected_version = line.split("==", 1)
+    name = re.sub(r"[-_.]+", "-", raw_name).lower()
+    expected[name] = expected_version
+for name, expected_version in expected.items():
+    actual_version = packages.get(name)
+    if actual_version != expected_version:
+        raise SystemExit(
+            "server lock mismatch for {}: expected {}, found {}".format(
+                name,
+                expected_version,
+                actual_version,
+            )
+        )
 environment = {
     "packages": packages,
     "python_version": python_version,
@@ -196,15 +218,17 @@ environment_sha256 = hashlib.sha256(
 print(json.dumps({
     "environment_sha256": environment_sha256,
     "flask_version": flask_version,
+    "lock_sha256": sys.argv[2],
     "packages": packages,
     "python_version": python_version,
     "werkzeug_version": werkzeug_version,
 }, sort_keys=True, separators=(",", ":")))
-')" || fail "pinned WebShop Python runtime attestation failed"
+' "${SERVER_LOCK}" "${LOCK_SHA256}")" ||
+    fail "pinned WebShop Python runtime attestation failed"
 
   python3 - \
     "${RUN_ROOT}/server_runtime.json" "${runtime_json}" \
-    "${JAVA_VERSION_LINE}" "${SERVER_COMMIT}" <<'PY'
+    "${JAVA_VERSION_LINE}" "${SERVER_COMMIT}" "${LOCK_SHA256}" <<'PY'
 import hashlib
 import json
 import os
@@ -222,6 +246,7 @@ if not isinstance(runtime, dict):
 expected_keys = {
     "environment_sha256",
     "flask_version",
+    "lock_sha256",
     "packages",
     "python_version",
     "werkzeug_version",
@@ -234,6 +259,8 @@ if runtime["flask_version"] != "2.1.2":
     raise SystemExit("server runtime Flask version is not 2.1.2")
 if runtime["werkzeug_version"] != "2.1.2":
     raise SystemExit("server runtime Werkzeug version is not 2.1.2")
+if runtime["lock_sha256"] != sys.argv[5]:
+    raise SystemExit("server runtime lock hash is invalid")
 packages = runtime["packages"]
 if (
     not isinstance(packages, dict)
@@ -358,6 +385,18 @@ require_command file
 SCRIPT_PATH="$(canonical_path "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
+SERVER_LOCK="${PROJECT_ROOT}/requirements-webshop-server-lock.txt"
+[[ -f "${SERVER_LOCK}" ]] ||
+  fail "server lock file is missing: ${SERVER_LOCK}"
+LOCK_SHA256="$(
+  python3 - "${SERVER_LOCK}" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+)" || fail "could not hash server lock: ${SERVER_LOCK}"
 WEBSHOP_ROOT="$(canonical_path "${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}")"
 if [[ -n "${WEBSHOP_ENV_PREFIX:-}" ]]; then
   WEBSHOP_ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX}")"
@@ -473,7 +512,8 @@ cd "${PROJECT_ROOT}"
 
 "${PLANU_PYTHON}" - \
   "${RUN_ROOT}" "${SERVER_COMMIT}" "${PLANU_COMMIT}" "${WEBSHOP_URL}" \
-  "${SMOKE_QUERY}" "${JAVA_VERSION_LINE}" <<'PY'
+  "${SMOKE_QUERY}" "${JAVA_VERSION_LINE}" "${SERVER_LOCK}" \
+  "${LOCK_SHA256}" <<'PY'
 import hashlib
 import json
 import math
@@ -487,6 +527,8 @@ expected_planu_commit = sys.argv[3]
 configured_server_url = sys.argv[4]
 expected_smoke_query = sys.argv[5]
 expected_java_version = sys.argv[6]
+server_lock_path = Path(sys.argv[7])
+expected_lock_sha256 = sys.argv[8]
 
 
 def load_object(path):
@@ -569,6 +611,8 @@ require_exact_keys(
     {
         "config_hash",
         "git_commit",
+        "installed_distributions",
+        "installed_distributions_sha256",
         "model_id",
         "packages",
         "planu_git_commit",
@@ -616,6 +660,35 @@ if not required_packages.issubset(packages):
     raise SystemExit("run metadata packages are incomplete")
 if any(not isinstance(value, str) or not value for value in packages.values()):
     raise SystemExit("run metadata package versions must be nonempty strings")
+installed_distributions = metadata.get("installed_distributions")
+if (
+    not isinstance(installed_distributions, dict)
+    or not installed_distributions
+    or list(installed_distributions) != sorted(installed_distributions)
+):
+    raise SystemExit(
+        "run metadata installed distributions must be a sorted nonempty object"
+    )
+if any(
+    not isinstance(name, str)
+    or not name
+    or not isinstance(value, str)
+    or not value
+    for name, value in installed_distributions.items()
+):
+    raise SystemExit("run metadata installed distribution mapping is invalid")
+client_environment_sha256 = hashlib.sha256(
+    json.dumps(
+        installed_distributions,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+if (
+    metadata.get("installed_distributions_sha256")
+    != client_environment_sha256
+):
+    raise SystemExit("client runtime environment hash is invalid")
 serialized_config = json.dumps(
     effective,
     sort_keys=True,
@@ -633,6 +706,7 @@ require_exact_keys(
         "environment_sha256",
         "flask_version",
         "java_version",
+        "lock_sha256",
         "packages",
         "python_version",
         "webshop_commit",
@@ -650,6 +724,8 @@ if server_runtime.get("java_version") != expected_java_version:
     raise SystemExit("server runtime Java version does not match execution")
 if server_runtime.get("webshop_commit") != expected_commit:
     raise SystemExit("server runtime WebShop commit does not match checkout")
+if server_runtime.get("lock_sha256") != expected_lock_sha256:
+    raise SystemExit("server runtime lock hash does not match the server lock")
 server_packages = server_runtime.get("packages")
 if not isinstance(server_packages, dict) or not server_packages:
     raise SystemExit("server runtime packages must be a nonempty object")
@@ -678,6 +754,24 @@ server_environment_sha256 = hashlib.sha256(
 ).hexdigest()
 if server_runtime.get("environment_sha256") != server_environment_sha256:
     raise SystemExit("server runtime environment hash is invalid")
+actual_lock_sha256 = hashlib.sha256(server_lock_path.read_bytes()).hexdigest()
+if actual_lock_sha256 != expected_lock_sha256:
+    raise SystemExit("server lock changed during the smoke run")
+locked_packages = {}
+for raw_line in server_lock_path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if "==" not in line:
+        raise SystemExit("server lock contains a non-exact requirement")
+    raw_name, version = line.split("==", 1)
+    name = raw_name.lower().replace("_", "-").replace(".", "-")
+    locked_packages[name] = version
+for name, version in locked_packages.items():
+    if server_packages.get(name) != version:
+        raise SystemExit(
+            "server runtime does not match locked distribution {}".format(name)
+        )
 
 args = effective["args"]
 require_exact_keys(
@@ -851,8 +945,10 @@ print(
     json.dumps(
         {
             "http_transition_count": len(trajectory),
+            "client_package_count": len(installed_distributions),
             "model_id": metadata["model_id"],
             "quantile_backup_count": backup_count,
+            "server_package_count": len(server_packages),
             "task_id": task["task_id"],
         },
         sort_keys=True,

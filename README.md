@@ -129,7 +129,10 @@ including the compatible Gym/NumPy/DI-engine/Werkzeug combination, the tested
 OpenAI SDK used by model-backed WebShop, and `easydict` required by RND. The
 benchmark packages are installed with `--no-deps` so they cannot replace these
 pins. The lock now contains 144 exact pins: the prior 143 resolved
-distributions plus the explicit build-tool pin `setuptools==66.1.1`.
+distributions plus the explicit build-tool pin `setuptools==66.1.1`, which is
+also a direct requirement. Environment-lock equality excludes only `pip`,
+`wheel`, and the three editable local distributions because those are
+installer/bootstrap state rather than resolved experiment dependencies.
 
 Prepare the external PlanBench checkout used by BlockWorld:
 
@@ -305,13 +308,14 @@ bash scripts/bootstrap_webshop.sh
 ```
 
 The bootstrap clones and pins the official repository, creates Python 3.8.13,
-sets `PIP_CONSTRAINT` to the committed
-`requirements-webshop-server.txt`, installs the exact direct server
-dependencies, downloads the small 1000-product dataset, verifies all three
-documented SHA-256 values before accepting the derived Lucene index, and
-checks that the server starts. The checkout must remain clean; generated
-data, indexes, and the isolated environment are excluded from source
-validation.
+installs `requirements-webshop-server.txt` with the complete 138-distribution
+`requirements-webshop-server-lock.txt` as `PIP_CONSTRAINT`, downloads the small
+1000-product dataset, verifies all three documented SHA-256 values before
+accepting the derived Lucene index, and checks that the server starts. The
+setup marker contains the lock SHA-256 and is refreshed only after every lock
+mapping, data file, index, and server check passes. The checkout must remain
+clean; generated data, indexes, and the isolated environment are excluded from
+source validation.
 
 On macOS arm64, export the Conda OpenJDK paths before bootstrap and smoke:
 The relevant variables are `JAVA_HOME`, `JVM_PATH`, `PATH`,
@@ -324,8 +328,10 @@ export PATH="$WEBSHOP_ENV_PREFIX/bin:$PATH"
 ```
 
 The pinned upstream requirements predate Apple Silicon wheels for several
-packages. If `setup.sh` fails on PyYAML, `tokenizers`, or `nmslib`, the following
-minimal server environment is the configuration exercised on macOS arm64:
+packages. The direct file therefore pins the validated `transformers==4.30.2`
+instead of upstream 4.19.2, whose tokenizers dependency has no compatible
+prebuilt wheel. The following minimal server environment is the configuration
+exercised on macOS arm64:
 
 ```bash
 conda create -y -p "$WEBSHOP_ENV_PREFIX" python=3.8.13
@@ -351,7 +357,10 @@ WEBSHOP_PYTHON="$WEBSHOP_ENV_PREFIX/bin/python"
 
 `nmslib` is not needed by the Lucene search path used by the Flask server. On
 machines where LightGBM cannot load its OpenMP runtime, install `libomp` with
-the platform package manager.
+the platform package manager. On this macOS arm64 environment, `pip check`
+reports `torch 1.11.0 is not supported on this platform` for the
+Conda-installed build even though the pinned package imports and the server
+smoke passes; the lock retains and validates `torch==1.11.0`.
 
 If the upstream Google Drive links reject anonymous `gdown` access, download
 the same small files from the cross-checked Hugging Face mirror:
@@ -417,7 +426,8 @@ Conda environment, and `WEBSHOP_PYTHON` can override the server interpreter.
 local server; authoritative smoke rejects non-local endpoints. `RUN_ROOT` is
 optional and otherwise a unique temporary output directory is created. The
 final artifact validator independently verifies `server_runtime.json` and its
-environment SHA-256.
+environment SHA-256, validates every server lock distribution, and checks the
+recorded lock SHA-256.
 
 The authoritative smoke evidence currently covers only `fixed_1`, using the
 scripted provider against the pinned local official server. It exits `0` and
@@ -513,11 +523,12 @@ WebShop writes:
 
 WebShop provenance includes the PlanU commit, pinned server commit, sanitized
 server URL, config hash, model identifier, seed, task bounds, Python version,
-and the full PlanU dependency mapping. These runtime fields are immutable run
+the existing selected `packages` mapping, and a canonical full installed
+distribution mapping with its SHA-256. These runtime fields are immutable run
 identity, so a changed Python or package environment is rejected before task
 execution or artifact writes. The authoritative smoke additionally records
-the server runtime versions, Java string, complete package mapping, and
-environment hash in `server_runtime.json`.
+the server runtime versions, Java string, complete package mapping,
+environment hash, and server lock hash in `server_runtime.json`.
 
 ## Reproduction Scope
 

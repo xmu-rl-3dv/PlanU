@@ -52,8 +52,11 @@ Install `requirements-experiments.txt` with
 `requirements-experiments-lock.txt` as its resolved Python 3.9 constraint set,
 including `openai==1.109.1` and its exact transitive dependencies. The lock
 contains 144 exact pins: the prior 143 resolved distributions plus the
-explicit build-tool pin `setuptools==66.1.1`. Then install the three editable
-packages as shown in the root README and run `scripts/smoke_phase_one.sh`. The
+explicit build-tool pin `setuptools==66.1.1`, which is also present in the
+direct requirements. Then install the three editable packages as shown in the
+root README and run `scripts/smoke_phase_one.sh`. Full lock equality excludes
+only `pip`, `wheel`, and the three editable local distributions; no registry
+dependency may be omitted. The
 OpenAI-compatible client is constructed lazily; dependency validation does
 not require a real key or API request.
 
@@ -99,13 +102,21 @@ bash scripts/bootstrap_webshop.sh
 
 The bootstrap validates the official remote, exact detached commit, Python
 3.8.13, Java 11, Flask 2.1.2, Werkzeug 2.1.2, the small dataset, the Lucene
-index, and server startup. Before upstream setup it exports `PIP_CONSTRAINT`
-pointing to `requirements-webshop-server.txt`, which exactly pins the direct
-official dependencies and the Python 3.8-compatible gdown, Gradio, pytest, and
-requests-mock versions. The three small data files must match the documented
-SHA-256 values before their derived index is accepted or the setup marker is
-written. The external checkout, environment, downloaded data, and indexes are
-runtime dependencies and are not repository inputs.
+index, and server startup. It installs the exact direct pins from
+`requirements-webshop-server.txt` with
+`requirements-webshop-server-lock.txt` as `PIP_CONSTRAINT`. The latter is the
+complete 138-distribution freeze of the validated server environment, including
+the exact pip, setuptools, and wheel build tools; Conda-origin `file://`
+references are normalized to versions. The direct transformer pin is 4.30.2
+because the upstream 4.19.2 tokenizers dependency has no compatible macOS arm64
+wheel. The three small data files must match the documented SHA-256 values
+before their derived index is accepted. The setup marker stores the lock
+SHA-256, so a lock change invalidates it. The external checkout, environment,
+downloaded data, and indexes are runtime dependencies and are not repository
+inputs. On the validated macOS arm64 environment, server `pip check` reports
+`torch 1.11.0 is not supported on this platform` for the Conda-installed
+build; the exact distribution remains in the lock and is validated because it
+imports and the authoritative server smoke passes.
 
 ## WebShop reference configuration
 
@@ -210,7 +221,10 @@ exactly Python 3.8.13, Flask 2.1.2, and Werkzeug 2.1.2. The atomic
 `server_runtime.json` records those versions, the Java 11 version string, the
 pinned WebShop commit, the complete normalized package mapping, and its
 deterministic environment SHA-256. Final artifact validation recomputes that
-hash and verifies every field.
+hash, verifies every lock distribution, and checks the recorded lock SHA-256.
+Client run metadata separately retains the selected `packages` field while
+adding the complete canonical installed-distribution mapping and its SHA-256;
+both full-map fields are part of `RUN_IDENTITY` during resume.
 
 The final authoritative smoke facts for this migration are limited to one
 task: exit `0`, `task_id: fixed_1`, `model_id: scripted`,

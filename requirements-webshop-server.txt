@@ -23,5 +23,7 @@ thefuzz==0.19.0
 torch==1.11.0
 tqdm==4.64.0
 train==0.0.5
-transformers==4.19.2
+# 4.30.2 is the validated macOS arm64 replacement for the upstream 4.19.2
+# pin, whose tokenizers dependency has no compatible prebuilt wheel.
+transformers==4.30.2
 Werkzeug==2.1.2

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import tempfile
 from typing import Any, Callable, Mapping, Optional
@@ -79,6 +80,36 @@ def installed_versions(
         except importlib_metadata.PackageNotFoundError:
             versions[output_key] = "not-installed"
     return versions
+
+
+def installed_distribution_identity(distributions_fn=None):
+    if distributions_fn is None:
+        distributions_fn = importlib_metadata.distributions
+    packages = {}
+    for distribution in distributions_fn():
+        raw_name = distribution.metadata.get("Name")
+        if not raw_name:
+            continue
+        name = re.sub(r"[-_.]+", "-", raw_name).lower()
+        version = distribution.version
+        prior = packages.get(name)
+        if prior is not None and prior != version:
+            raise ValueError(
+                "conflicting installed distributions for {}".format(name)
+            )
+        packages[name] = version
+    packages = dict(sorted(packages.items()))
+    serialized = json.dumps(
+        packages,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "installed_distributions": packages,
+        "installed_distributions_sha256": hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def build_run_metadata(
@@ -168,6 +199,7 @@ __all__ = [
     "build_run_metadata",
     "config_hash",
     "git_commit",
+    "installed_distribution_identity",
     "installed_versions",
     "record_run_provenance",
     "write_json_provenance",

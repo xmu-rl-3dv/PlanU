@@ -23,6 +23,7 @@ from planu_core.provenance import (
     build_effective_config,
     build_run_metadata,
     config_hash,
+    installed_distribution_identity,
 )
 from planu_core.search import PlanUSearch
 from planu_core.text_backend import (
@@ -59,6 +60,8 @@ RUN_IDENTITY_FIELDS = (
     "webshop_commit",
     "python_version",
     "packages",
+    "installed_distributions",
+    "installed_distributions_sha256",
     "config_hash",
 )
 
@@ -128,6 +131,9 @@ class RunnerDependencies:
         ScriptedWebShopActionScorer
     )
     metadata_factory: Callable[..., Mapping[str, Any]] = build_run_metadata
+    distribution_identity_factory: Callable[
+        [], Mapping[str, Any]
+    ] = installed_distribution_identity
 
 
 def _positive_int(value: str) -> int:
@@ -305,6 +311,7 @@ def _run_metadata(
             package_distributions=WEBSHOP_DISTRIBUTIONS,
         )
     )
+    metadata.update(dependencies.distribution_identity_factory())
     metadata["planu_git_commit"] = metadata.get("git_commit", "unknown")
     metadata.update(
         {

@@ -88,6 +88,59 @@ def test_installed_versions_maps_ding_to_di_engine():
     assert versions["gym"] == "not-installed"
 
 
+def test_installed_distribution_identity_is_complete_normalized_and_hashed():
+    from planu_core.provenance import installed_distribution_identity
+
+    class Distribution:
+        def __init__(self, name, version):
+            self.metadata = {"Name": name}
+            self.version = version
+
+    identity = installed_distribution_identity(
+        distributions_fn=lambda: [
+            Distribution("Z_pkg", "3.0"),
+            Distribution("alpha.pkg", "1.0"),
+            Distribution("Alpha-Pkg", "1.0"),
+            Distribution(None, "ignored"),
+        ]
+    )
+    packages = {
+        "alpha-pkg": "1.0",
+        "z-pkg": "3.0",
+    }
+
+    assert identity == {
+        "installed_distributions": packages,
+        "installed_distributions_sha256": hashlib.sha256(
+            json.dumps(
+                packages,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    assert list(identity["installed_distributions"]) == sorted(packages)
+
+
+def test_installed_distribution_identity_rejects_conflicting_canonical_names():
+    import pytest
+
+    from planu_core.provenance import installed_distribution_identity
+
+    class Distribution:
+        def __init__(self, name, version):
+            self.metadata = {"Name": name}
+            self.version = version
+
+    with pytest.raises(ValueError, match="conflicting installed distributions"):
+        installed_distribution_identity(
+            distributions_fn=lambda: [
+                Distribution("same_name", "1.0"),
+                Distribution("same-name", "2.0"),
+            ]
+        )
+
+
 def test_record_run_provenance_uses_stable_tags():
     from planu_core.provenance import record_run_provenance
 

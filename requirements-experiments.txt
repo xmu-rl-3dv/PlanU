@@ -1,5 +1,6 @@
 # Direct dependencies for the tested Python 3.9 PlanU experiment runtime.
 # Install with -c requirements-experiments-lock.txt.
+setuptools==66.1.1
 numpy==1.23.5
 gym==0.25.1
 pygame==2.4.0

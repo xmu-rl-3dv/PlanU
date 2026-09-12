@@ -19,6 +19,9 @@ EXPERIMENT_LOCK = REPOSITORY_ROOT / "requirements-experiments-lock.txt"
 WEBSHOP_SERVER_REQUIREMENTS = (
     REPOSITORY_ROOT / "requirements-webshop-server.txt"
 )
+WEBSHOP_SERVER_LOCK = (
+    REPOSITORY_ROOT / "requirements-webshop-server-lock.txt"
+)
 
 
 def _readme():
@@ -212,6 +215,7 @@ def test_readme_documents_webshop_setup_and_real_smoke():
         "Pyserini",
         "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd",
         "`requirements-webshop-server.txt`",
+        "`requirements-webshop-server-lock.txt`",
         "`scripts/bootstrap_webshop.sh`",
         "`scripts/smoke_webshop.sh`",
         "`JAVA_HOME`",
@@ -226,6 +230,7 @@ def test_readme_documents_webshop_setup_and_real_smoke():
         "`OPENAI_BASE_URL`",
         "`server_runtime.json`",
         "environment SHA-256",
+        "lock SHA-256",
         "http_transition_count",
         "quantile_backup_count",
         "search[product]",
@@ -395,6 +400,39 @@ def test_docs_explain_experiment_lock_and_webshop_server_attestation():
         assert "environment SHA-256" in document
 
 
+def test_webshop_server_lock_is_complete_canonical_freeze():
+    requirements = [
+        line.strip()
+        for line in WEBSHOP_SERVER_LOCK.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    names = [requirement.split("==", 1)[0] for requirement in requirements]
+
+    assert len(requirements) == 138
+    assert names == sorted(names)
+    assert len(set(names)) == len(names)
+    assert all("==" in requirement for requirement in requirements)
+    assert all("file://" not in requirement for requirement in requirements)
+    for requirement in (
+        "en-core-web-sm==3.3.0",
+        "faiss==1.8.0",
+        "packaging==26.2",
+        "pip==24.3.1",
+        "setuptools==68.2.2",
+        "wheel==0.45.1",
+    ):
+        assert requirement in requirements
+    locked_names = set(names)
+    direct_names = {
+        re.sub(r"[-_.]+", "-", line.split("==", 1)[0]).lower()
+        for line in WEBSHOP_SERVER_REQUIREMENTS.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    assert direct_names <= locked_names
+
+
 def test_webshop_server_requirements_exactly_pin_upstream_direct_dependencies():
     requirements = {
         line.strip()
@@ -428,7 +466,7 @@ def test_webshop_server_requirements_exactly_pin_upstream_direct_dependencies():
         "torch==1.11.0",
         "tqdm==4.64.0",
         "train==0.0.5",
-        "transformers==4.19.2",
+        "transformers==4.30.2",
         "Werkzeug==2.1.2",
     }
 
@@ -446,6 +484,7 @@ def test_experiment_requirements_pin_compatible_runtime_versions():
         "opencv-python==4.8.1.78",
         "DI-engine==0.5.3",
         "openai==1.109.1",
+        "setuptools==66.1.1",
         "Werkzeug==2.0.3",
         "torch==2.8.0",
         "transformers==4.57.6",

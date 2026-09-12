@@ -1,5 +1,6 @@
 import ast
 from dataclasses import replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ from planu_core.webshop.runner import (
 ROOT = Path(__file__).resolve().parents[2]
 WEBSHOP_SCRIPT = ROOT / "scripts" / "smoke_webshop.sh"
 WEBSHOP_BOOTSTRAP = ROOT / "scripts" / "bootstrap_webshop.sh"
+WEBSHOP_SERVER_LOCK = ROOT / "requirements-webshop-server-lock.txt"
 SCRIPT_TIMEOUT = 20
 
 
@@ -222,6 +224,18 @@ else:
             "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
         ),
     }
+    metadata["installed_distributions"] = {
+        "beautifulsoup4": "test-version",
+        "openai": "1.109.1",
+        "pip": "test-version",
+    }
+    metadata["installed_distributions_sha256"] = hashlib.sha256(
+        json.dumps(
+            metadata["installed_distributions"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     trajectory = [
         {
             "action": "search[product]",
@@ -275,6 +289,10 @@ else:
         del task["trajectory"][0]["observation"]
     elif mode == "reward_mismatch":
         task["best_terminal_reward"] = 0.25
+    elif mode == "client_runtime_wrong_hash":
+        metadata["installed_distributions_sha256"] = "0" * 64
+    elif mode == "client_runtime_wrong_map":
+        metadata["installed_distributions"]["openai"] = "wrong"
 
 manifest = {
     "effective_config": effective,
@@ -337,17 +355,24 @@ if [[ "${1:-}" == "-c" ]]; then
   "$FAKE_REAL_PYTHON" - \
     "${FAKE_SERVER_PYTHON_VERSION:-3.8.13}" \
     "${FAKE_SERVER_FLASK_VERSION:-2.1.2}" \
-    "${FAKE_SERVER_WERKZEUG_VERSION:-2.1.2}" <<'PY'
+    "${FAKE_SERVER_WERKZEUG_VERSION:-2.1.2}" \
+    "${3:-$FAKE_SERVER_LOCK}" "${4:-$FAKE_SERVER_LOCK_SHA256}" <<'PY'
 import hashlib
 import json
+from pathlib import Path
 import sys
 
-python_version, flask_version, werkzeug_version = sys.argv[1:]
-packages = {
-    "flask": flask_version,
-    "test-package": "1.0",
-    "werkzeug": werkzeug_version,
-}
+python_version, flask_version, werkzeug_version, lock_path, lock_sha256 = (
+    sys.argv[1:]
+)
+packages = {}
+for raw_line in Path(lock_path).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if line and not line.startswith("#"):
+        name, version = line.split("==", 1)
+        packages[name] = version
+packages["flask"] = flask_version
+packages["werkzeug"] = werkzeug_version
 environment = {
     "packages": packages,
     "python_version": python_version,
@@ -361,6 +386,7 @@ print(json.dumps({
         ).encode("utf-8")
     ).hexdigest(),
     "flask_version": flask_version,
+    "lock_sha256": lock_sha256,
     "packages": packages,
     "python_version": python_version,
     "werkzeug_version": werkzeug_version,
@@ -439,6 +465,9 @@ kill -0 "$server_pid" 2>/dev/null
         text=True,
         timeout=SCRIPT_TIMEOUT,
     ).strip()
+    server_lock_sha256 = hashlib.sha256(
+        WEBSHOP_SERVER_LOCK.read_bytes()
+    ).hexdigest()
     environment = script_environment(
         fake_bin,
         FAKE_ARTIFACT_MODE=artifact_mode,
@@ -450,6 +479,8 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_REAL_PYTHON=sys.executable,
         FAKE_RESIST_TERM="1" if resistant else "0",
         FAKE_SERVER_ENV_LOG=str(server_env_log),
+        FAKE_SERVER_LOCK=str(WEBSHOP_SERVER_LOCK),
+        FAKE_SERVER_LOCK_SHA256=server_lock_sha256,
         FAKE_SERVER_PID_LOG=str(server_pid_log),
         FAKE_SERVER_URL="http://127.0.0.1:3000",
         FAKE_WEBSHOP_PYTHON=str(env_prefix / "bin" / "python"),
@@ -744,6 +775,24 @@ class DependencyHarness:
             },
         }
 
+    @staticmethod
+    def distribution_identity_factory():
+        packages = {
+            "beautifulsoup4": "4.11.1",
+            "openai": "1.109.1",
+            "pip": "test-version",
+        }
+        return {
+            "installed_distributions": packages,
+            "installed_distributions_sha256": hashlib.sha256(
+                json.dumps(
+                    packages,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+
     def dependencies(self):
         return RunnerDependencies(
             client_factory=self.client_factory,
@@ -755,6 +804,7 @@ class DependencyHarness:
             scripted_provider_factory=self.scripted_provider_factory,
             scripted_scorer_factory=self.scripted_scorer_factory,
             metadata_factory=self.metadata_factory,
+            distribution_identity_factory=self.distribution_identity_factory,
         )
 
 
@@ -993,6 +1043,10 @@ def test_result_uses_best_observed_terminal_trajectory_and_valid_schema(
         "start": 1,
         "end_exclusive": 2,
     }
+    assert result["provenance"]["installed_distributions"]["openai"] == (
+        "1.109.1"
+    )
+    assert len(result["provenance"]["installed_distributions_sha256"]) == 64
 
 
 def test_terminal_maximum_stops_before_a_failing_second_iteration(tmp_path):
@@ -1111,6 +1165,8 @@ def test_provenance_manifest_is_published_last_before_search_and_redacts_urls(
         "server_url",
         "python_version",
         "packages",
+        "installed_distributions",
+        "installed_distributions_sha256",
         "config_hash",
         "webshop_commit",
         "planu_git_commit",
@@ -1134,6 +1190,8 @@ def test_manifest_identity_mismatch_refuses_reuse_before_altering_artifacts(
         replacement = {"start": 9, "end_exclusive": 10}
     elif mutation == "packages":
         replacement = {"numpy": "wrong-identity"}
+    elif mutation == "installed_distributions":
+        replacement = {"openai": "wrong-identity"}
     else:
         replacement = "wrong-identity"
     manifest["run_metadata"][mutation] = replacement
@@ -1352,9 +1410,15 @@ def test_manifest_reuse_rejects_changed_environment_before_artifact_changes(
         metadata["packages"]["numpy"] = "changed-version"
         return metadata
 
+    def changed_distribution_identity():
+        identity = second_harness.distribution_identity_factory()
+        identity["installed_distributions"]["openai"] = "changed-version"
+        return identity
+
     dependencies = replace(
         second_harness.dependencies(),
         metadata_factory=changed_environment_metadata,
+        distribution_identity_factory=changed_distribution_identity,
     )
 
     with pytest.raises(WebShopRunnerError):
@@ -1925,7 +1989,9 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "BASH_SOURCE[0]" in bootstrap
     assert "python=3.8.13" in bootstrap
     assert "requirements-webshop-server.txt" in bootstrap
+    assert "requirements-webshop-server-lock.txt" in bootstrap
     assert "PIP_CONSTRAINT" in bootstrap
+    assert "LOCK_SHA256" in bootstrap
     assert "Werkzeug==2.1.2" in bootstrap
     assert "importlib.metadata" in bootstrap
     assert "30a4765c3a327af72d9a9a95a6b2486d516f0fa1d3ecd83681901ce82a21b269" in bootstrap
@@ -1945,6 +2011,8 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "WEBSHOP_ROOT" in smoke
     assert "WEBSHOP_URL" in smoke
     assert "server_runtime.json" in smoke
+    assert "requirements-webshop-server-lock.txt" in smoke
+    assert "lock_sha256" in smoke
     assert "platform.python_version" in smoke
     assert 'version("Flask")' in smoke
     assert 'version("Werkzeug")' in smoke
@@ -2320,6 +2388,13 @@ def test_webshop_bootstrap_configures_resolved_conda_java_for_server(
         "JAVA_HOME={}".format(java_home),
         "PATH={}:{}".format(java_home / "bin", environment["PATH"]),
     ]
+    marker = env_prefix / (
+        ".planu-webshop-small-"
+        "64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd"
+    )
+    assert marker.read_text(encoding="utf-8").strip() == hashlib.sha256(
+        WEBSHOP_SERVER_LOCK.read_bytes()
+    ).hexdigest()
 
 
 def test_webshop_fresh_bootstrap_installs_and_exports_java_before_setup(
@@ -2335,7 +2410,7 @@ def test_webshop_fresh_bootstrap_installs_and_exports_java_before_setup(
     write_executable(
         webshop_root / "setup.sh",
         """
-[[ "${PIP_CONSTRAINT:-}" == */requirements-webshop-server.txt ]] || {
+[[ "${PIP_CONSTRAINT:-}" == */requirements-webshop-server-lock.txt ]] || {
   printf 'setup missing PIP_CONSTRAINT\n' >&2
   exit 29
 }
@@ -2420,6 +2495,9 @@ elif [[ "$*" == "-m pip install Werkzeug==2.1.2" ]]; then
   esac
   printf 'pip install Werkzeug==2.1.2\n' >> "$FAKE_EVENT_LOG"
   printf '2.1.2\n' > "$FAKE_WERKZEUG_VERSION_FILE"
+elif [[ "$*" == *"requirements-webshop-server.txt"* &&
+  "$*" == *"requirements-webshop-server-lock.txt"* ]]; then
+  printf 'pip install locked direct requirements\n' >> "$FAKE_EVENT_LOG"
 elif [[ "$*" == *"import pyserini"* ]] ||
   [[ "$*" == *"import web_agent_site.app"* ]]; then
   java_home="$FAKE_ENV_PREFIX/lib/jvm"
@@ -2498,7 +2576,9 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
     ).format(env_prefix)
     assert events.index(create) < events.index(java)
     assert events.index(java) < events.index(werkzeug)
-    assert events.index(werkzeug) < events.index(upstream)
+    locked_direct = "pip install locked direct requirements"
+    assert events.index(werkzeug) < events.index(locked_direct)
+    assert events.index(locked_direct) < events.index(upstream)
     assert events.index(upstream) < events.index("setup")
     assert events.count("python werkzeug") >= 2
     assert events.index(werkzeug) < events.index("setup")
@@ -2847,6 +2927,9 @@ def test_webshop_smoke_starts_pinned_local_checkout_and_verifies_artifacts(
     )
     assert runtime["packages"]["flask"] == "2.1.2"
     assert runtime["packages"]["werkzeug"] == "2.1.2"
+    assert runtime["lock_sha256"] == hashlib.sha256(
+        WEBSHOP_SERVER_LOCK.read_bytes()
+    ).hexdigest()
     assert len(runtime["environment_sha256"]) == 64
     java_home = (
         Path(environment["WEBSHOP_ENV_PREFIX"]).resolve() / "lib" / "jvm"
@@ -3037,6 +3120,8 @@ def test_webshop_smoke_kills_term_resistant_process_group(tmp_path):
         ("missing_observation", "keys mismatch"),
         ("reward_mismatch", "terminal reward"),
         ("results_mismatch", "consolidated results"),
+        ("client_runtime_wrong_hash", "client runtime environment hash"),
+        ("client_runtime_wrong_map", "client runtime environment hash"),
         ("server_runtime_wrong_hash", "server runtime environment hash"),
         ("server_runtime_wrong_flask", "server runtime Flask version"),
     ],
