@@ -236,8 +236,12 @@ class PlanUSearch:
         if self.action_provider is None:
             candidates = list(self.adapter.actions(state, node.visit_count))
         else:
+            # run_iteration registers the current visit before expansion.
             candidates = list(
-                self.action_provider.actions(state, node.visit_count)
+                self.action_provider.actions(
+                    state,
+                    max(0, node.visit_count - 1),
+                )
             )
         if not candidates:
             return

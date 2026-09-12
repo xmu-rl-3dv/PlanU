@@ -72,24 +72,21 @@ def test_action_provider_protocol_is_exported_with_expected_contract():
     ]
 
 
-def test_expand_uses_explicit_provider_with_state_and_visit_count():
+def test_run_iteration_uses_explicit_provider_with_prior_visit_count():
     adapter = FakeAdapter()
     provider = RecordingActionProvider()
     search = PlanUSearch(
         adapter,
         UniformScorer(),
-        PlanUConfig(),
+        PlanUConfig(max_depth=1),
         action_provider=provider,
     )
-    state = adapter.reset()
-    root = search._ensure_root(state)
-    root.visit_count = 7
 
-    search.expand(root, state, np.random.default_rng(1))
+    search.run_iteration(0, np.random.default_rng(1))
 
-    assert provider.calls == [(state, 7)]
+    assert provider.calls == [(adapter.reset_state, 0)]
     assert adapter.action_calls == 0
-    assert list(root.children) == ["advance"]
+    assert list(search.root.children) == ["advance"]
 
 
 def test_expand_uses_adapter_actions_by_default():
