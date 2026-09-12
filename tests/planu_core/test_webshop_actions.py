@@ -15,7 +15,7 @@ def test_supported_actions_render_and_expose_stable_keys(kind):
 
 
 def test_action_normalizes_kind_and_argument_whitespace():
-    action = WebShopAction("ClIcK", "  Buy \n\t Now  ")
+    action = WebShopAction(" ClIcK ", "  Buy \n\t Now  ")
 
     assert action == WebShopAction("click", "Buy Now")
     assert action.key == ("click", "Buy Now")
@@ -26,7 +26,6 @@ def test_action_normalizes_kind_and_argument_whitespace():
     ("kind", "argument"),
     [
         ("open", "item"),
-        (" search ", "item"),
         ("click", ""),
         ("think", " \n\t "),
     ],
@@ -47,7 +46,7 @@ def test_action_is_hashable_and_immutable():
 def test_parser_is_exported_from_actions_and_package():
     expected = WebShopAction("search", "blue shoes")
 
-    assert parse_action("search[blue shoes]") == expected
+    assert parse_action(text="search[blue shoes]") == expected
     assert parse_action_from_actions("search[blue shoes]") == expected
 
 
@@ -55,11 +54,9 @@ def test_parser_is_exported_from_actions_and_package():
     ("text", "expected"),
     [
         ("search[blue shoes]", WebShopAction("search", "blue shoes")),
+        ("  search[blue shoes]  ", WebShopAction("search", "blue shoes")),
         ("CLICK[Buy Now]", WebShopAction("click", "Buy Now")),
-        (
-            "ThInK[  compare \n prices  ]",
-            WebShopAction("think", "compare prices"),
-        ),
+        ("ThInK[  compare prices  ]", WebShopAction("think", "compare prices")),
     ],
 )
 def test_parser_accepts_only_supported_actions_case_insensitively(
@@ -85,8 +82,8 @@ def test_parser_accepts_only_supported_actions_case_insensitively(
         "Action: search[query]",
         "prefix search[query]",
         "search[query] suffix",
-        " search[query]",
-        "search[query] ",
+        "think[compare\nprices]",
+        "think[compare\rprices]",
         "open[item]",
     ],
 )

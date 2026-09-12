@@ -5,7 +5,7 @@ from typing import Tuple
 
 _SUPPORTED_KINDS = frozenset(("search", "click", "think"))
 _ACTION_PATTERN = re.compile(
-    r"(?P<kind>search|click|think)\[(?P<argument>[^\[\]]+)\]",
+    r"(?P<kind>search|click|think)\[(?P<argument>[^\[\]\r\n]+)\]",
     re.IGNORECASE,
 )
 
@@ -18,7 +18,7 @@ class WebShopAction:
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str):
             raise ValueError("WebShop action kind must be a string")
-        kind = self.kind.lower()
+        kind = self.kind.strip().lower()
         if kind not in _SUPPORTED_KINDS:
             raise ValueError("unsupported WebShop action kind: {!r}".format(self.kind))
 
@@ -39,13 +39,14 @@ class WebShopAction:
         return "{}[{}]".format(self.kind, self.argument)
 
 
-def parse_action(value: str) -> WebShopAction:
-    if not isinstance(value, str):
+def parse_action(text: str) -> WebShopAction:
+    if not isinstance(text, str):
         raise ValueError("WebShop action must be a string")
 
-    match = _ACTION_PATTERN.fullmatch(value)
+    text = text.strip()
+    match = _ACTION_PATTERN.fullmatch(text)
     if match is None:
-        raise ValueError("invalid WebShop action: {!r}".format(value))
+        raise ValueError("invalid WebShop action: {!r}".format(text))
 
     return WebShopAction(match.group("kind"), match.group("argument"))
 
