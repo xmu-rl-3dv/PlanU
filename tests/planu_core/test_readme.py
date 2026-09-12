@@ -172,7 +172,7 @@ def test_readme_installation_keeps_benchmark_environments_external():
 
     for term in ("Python 3.9", "`gym-macro-overcooked`", "`virtual-home`", "external"):
         assert term in installation
-    assert "python -m pip install --no-deps -e ." in installation
+    assert "not a third installed-distribution exemption" in installation
 
 
 def test_readme_documents_complete_overcooked_setup():
@@ -191,7 +191,6 @@ def test_readme_documents_complete_overcooked_setup():
             "python -m pip install -r requirements-experiments.txt "
             "-c requirements-experiments-lock.txt"
         ),
-        "python -m pip install --no-deps -e .",
         "python -m pip install --no-deps -e gym-macro-overcooked",
         "python -m pip install --no-deps -e virtual-home",
     )
@@ -396,8 +395,13 @@ def test_docs_explain_experiment_lock_and_webshop_server_attestation():
         assert "144 exact pins" in document
         assert "143 resolved distributions" in document
         assert "`setuptools==66.1.1`" in document
+        assert "`gym-macro-overcooked`" in document
+        assert "`virtual-home`" in document
         assert "`server_runtime.json`" in document
         assert "environment SHA-256" in document
+        assert "no metadata exemptions" in document.lower() or (
+            "no server distribution exemptions" in document.lower()
+        )
 
 
 def test_webshop_server_lock_is_complete_canonical_freeze():

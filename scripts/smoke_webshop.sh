@@ -14,6 +14,9 @@ SERVER_PID=""
 SERVER_PGID=""
 SERVER_COMMIT=""
 JAVA_VERSION_LINE=""
+# importlib.metadata exposes no extra Conda-only distributions in the
+# validated 138-distribution prefix.
+SERVER_CONDA_METADATA_EXEMPTIONS=""
 
 fail() {
   printf 'WebShop smoke error: %s\n' "$*" >&2
@@ -139,9 +142,23 @@ configure_java_runtime() {
   export PATH="${JAVA_HOME}/bin:${PATH}"
 }
 
-write_server_runtime_attestation() {
+verify_client_locked_environment() {
+  "${PLANU_PYTHON}" "${LOCK_CHECKER}" "${EXPERIMENT_LOCK}" \
+    --allow-extra pip \
+    --allow-extra wheel \
+    --editable-extra \
+      "gym-macro-overcooked=${PROJECT_ROOT}/gym-macro-overcooked" \
+    --editable-extra "virtual-home=${PROJECT_ROOT}/virtual-home"
+}
+
+verify_server_locked_environment() {
+  [[ -z "${SERVER_CONDA_METADATA_EXEMPTIONS}" ]] ||
+    fail "unexpected server distribution exemptions are configured"
+  "${WEBSHOP_PYTHON}" "${LOCK_CHECKER}" "${SERVER_LOCK}"
+}
+
+verify_server_python_executable() {
   local executable_type
-  local runtime_json
 
   executable_type="$(file -L -b --mime-type "${WEBSHOP_PYTHON}")" ||
     fail "could not inspect pinned WebShop Python executable"
@@ -153,6 +170,10 @@ write_server_runtime_attestation() {
       fail "pinned WebShop Python must be a native Python executable; found ${executable_type}"
       ;;
   esac
+}
+
+write_server_runtime_attestation() {
+  local runtime_json
 
   runtime_json="$("${WEBSHOP_PYTHON}" -c '
 import hashlib
@@ -204,6 +225,9 @@ for name, expected_version in expected.items():
                 actual_version,
             )
         )
+extras = sorted(set(packages) - set(expected))
+if extras:
+    raise SystemExit("server lock contains unrecognized extras: " + repr(extras))
 environment = {
     "packages": packages,
     "python_version": python_version,
@@ -385,7 +409,13 @@ require_command file
 SCRIPT_PATH="$(canonical_path "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
+LOCK_CHECKER="${PROJECT_ROOT}/planu_core/distribution_lock.py"
+EXPERIMENT_LOCK="${PROJECT_ROOT}/requirements-experiments-lock.txt"
 SERVER_LOCK="${PROJECT_ROOT}/requirements-webshop-server-lock.txt"
+[[ -f "${LOCK_CHECKER}" ]] ||
+  fail "distribution lock checker is missing: ${LOCK_CHECKER}"
+[[ -f "${EXPERIMENT_LOCK}" ]] ||
+  fail "experiment lock file is missing: ${EXPERIMENT_LOCK}"
 [[ -f "${SERVER_LOCK}" ]] ||
   fail "server lock file is missing: ${SERVER_LOCK}"
 LOCK_SHA256="$(
@@ -429,6 +459,8 @@ verify_planu_source_clean
 PLANU_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)"
 [[ -n "${PLANU_COMMIT}" ]] ||
   fail "could not resolve the current clean PlanU checkout commit"
+verify_client_locked_environment ||
+  fail "PlanU experiment lock verification failed"
 
 mkdir -p "${RUN_ROOT}"
 
@@ -464,6 +496,9 @@ working_tree_status="$(
 
 [[ -x "${WEBSHOP_PYTHON}" ]] ||
   fail "pinned WebShop Python is missing; run scripts/bootstrap_webshop.sh"
+verify_server_python_executable
+verify_server_locked_environment ||
+  fail "WebShop server lock verification failed"
 configure_java_runtime
 write_server_runtime_attestation
 server_reachable &&
@@ -767,11 +802,22 @@ for raw_line in server_lock_path.read_text(encoding="utf-8").splitlines():
     raw_name, version = line.split("==", 1)
     name = raw_name.lower().replace("_", "-").replace(".", "-")
     locked_packages[name] = version
-for name, version in locked_packages.items():
-    if server_packages.get(name) != version:
-        raise SystemExit(
-            "server runtime does not match locked distribution {}".format(name)
+if server_packages != locked_packages:
+    missing = sorted(set(locked_packages) - set(server_packages))
+    extras = sorted(set(server_packages) - set(locked_packages))
+    mismatches = sorted(
+        name
+        for name in set(locked_packages) & set(server_packages)
+        if locked_packages[name] != server_packages[name]
+    )
+    raise SystemExit(
+        "server runtime distribution lock mismatch "
+        "(missing={}, mismatches={}, extras={})".format(
+            missing,
+            mismatches,
+            extras,
         )
+    )
 
 args = effective["args"]
 require_exact_keys(

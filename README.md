@@ -119,7 +119,6 @@ python3.9 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements-experiments.txt -c requirements-experiments-lock.txt
-python -m pip install --no-deps -e .
 python -m pip install --no-deps -e gym-macro-overcooked
 python -m pip install --no-deps -e virtual-home
 ```
@@ -130,9 +129,12 @@ OpenAI SDK used by model-backed WebShop, and `easydict` required by RND. The
 benchmark packages are installed with `--no-deps` so they cannot replace these
 pins. The lock now contains 144 exact pins: the prior 143 resolved
 distributions plus the explicit build-tool pin `setuptools==66.1.1`, which is
-also a direct requirement. Environment-lock equality excludes only `pip`,
-`wheel`, and the three editable local distributions because those are
-installer/bootstrap state rather than resolved experiment dependencies.
+also a direct requirement. Authoritative WebShop smoke requires exact lock
+equality before server startup or runner execution. It excludes only `pip`,
+`wheel`, `gym-macro-overcooked`, and `virtual-home`; both local distributions
+must be editable installs whose origins match their directories under this
+checkout. The repository package itself runs directly from the checkout and
+is not a third installed-distribution exemption.
 
 Prepare the external PlanBench checkout used by BlockWorld:
 
@@ -426,8 +428,9 @@ Conda environment, and `WEBSHOP_PYTHON` can override the server interpreter.
 local server; authoritative smoke rejects non-local endpoints. `RUN_ROOT` is
 optional and otherwise a unique temporary output directory is created. The
 final artifact validator independently verifies `server_runtime.json` and its
-environment SHA-256, validates every server lock distribution, and checks the
-recorded lock SHA-256.
+environment SHA-256, validates exact equality with the 138-distribution server
+lock, and checks the recorded lock SHA-256. There are no server distribution
+exemptions in the validated Conda prefix.
 
 The authoritative smoke evidence currently covers only `fixed_1`, using the
 scripted provider against the pinned local official server. It exits `0` and

@@ -12,6 +12,9 @@ START_ATTEMPTS="${WEBSHOP_BOOTSTRAP_START_ATTEMPTS:-120}"
 STOP_ATTEMPTS="${WEBSHOP_STOP_ATTEMPTS:-20}"
 SERVER_PID=""
 SERVER_PGID=""
+# importlib.metadata exposes no extra Conda-only distributions in the
+# validated 138-distribution prefix.
+SERVER_CONDA_METADATA_EXEMPTIONS=""
 
 fail() {
   printf 'WebShop bootstrap error: %s\n' "$*" >&2
@@ -130,46 +133,9 @@ verify_flask() {
 }
 
 verify_locked_environment() {
-  "${ENV_PREFIX}/bin/python" -c '
-from importlib.metadata import distributions
-from pathlib import Path
-import re
-import sys
-
-expected = {}
-for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-    line = raw_line.strip()
-    if not line or line.startswith("#"):
-        continue
-    if "==" not in line:
-        raise SystemExit("server lock contains a non-exact requirement: " + line)
-    raw_name, version = line.split("==", 1)
-    name = re.sub(r"[-_.]+", "-", raw_name).lower()
-    expected[name] = version
-
-installed = {}
-for distribution in distributions():
-    raw_name = distribution.metadata.get("Name")
-    if not raw_name:
-        continue
-    name = re.sub(r"[-_.]+", "-", raw_name).lower()
-    prior = installed.get(name)
-    if prior is not None and prior != distribution.version:
-        raise SystemExit("conflicting installed distributions for " + name)
-    installed[name] = distribution.version
-
-mismatches = {
-    name: (version, installed.get(name))
-    for name, version in expected.items()
-    if installed.get(name) != version
-}
-if mismatches:
-    details = ", ".join(
-        "{} expected {} found {}".format(name, values[0], values[1])
-        for name, values in sorted(mismatches.items())
-    )
-    raise SystemExit("server lock mismatch: " + details)
-' "${SERVER_LOCK}"
+  [[ -z "${SERVER_CONDA_METADATA_EXEMPTIONS}" ]] ||
+    fail "unexpected server distribution exemptions are configured"
+  "${ENV_PREFIX}/bin/python" "${LOCK_CHECKER}" "${SERVER_LOCK}"
 }
 
 verify_environment() {
@@ -322,6 +288,7 @@ SCRIPT_DIR="${SCRIPT_PATH%/*}"
 PROJECT_ROOT="${SCRIPT_DIR%/*}"
 ROOT="$(canonical_path "${WEBSHOP_ROOT:-${PROJECT_ROOT}/external/WebShop}")"
 ENV_PREFIX="$(canonical_path "${WEBSHOP_ENV_PREFIX:-${ROOT}/.conda-planu}")"
+LOCK_CHECKER="${PROJECT_ROOT}/planu_core/distribution_lock.py"
 DIRECT_REQUIREMENTS="${PROJECT_ROOT}/requirements-webshop-server.txt"
 SERVER_LOCK="${PROJECT_ROOT}/requirements-webshop-server-lock.txt"
 PIP_CONSTRAINT="${SERVER_LOCK}"
@@ -330,6 +297,8 @@ SETUP_MARKER="${ENV_PREFIX}/.planu-webshop-small-${COMMIT}"
   fail "server direct requirements file is missing: ${DIRECT_REQUIREMENTS}"
 [[ -f "${SERVER_LOCK}" ]] ||
   fail "server lock file is missing: ${SERVER_LOCK}"
+[[ -f "${LOCK_CHECKER}" ]] ||
+  fail "distribution lock checker is missing: ${LOCK_CHECKER}"
 LOCK_SHA256="$(
   python3 - "${SERVER_LOCK}" <<'PY'
 import hashlib
@@ -456,7 +425,7 @@ else
       bash ./setup.sh -d small
   ) || fail "upstream small setup failed; check network access and its log output"
   verify_small_setup ||
-    fail "upstream small setup finished without required data, Lucene index artifacts, or server module"
+    fail "upstream small setup finished with a server lock mismatch or without required data, Lucene index artifacts, or server module"
   verify_server_startup
   write_setup_marker
 fi

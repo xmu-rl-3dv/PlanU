@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import traceback
@@ -26,7 +27,9 @@ from planu_core.webshop.runner import (
 ROOT = Path(__file__).resolve().parents[2]
 WEBSHOP_SCRIPT = ROOT / "scripts" / "smoke_webshop.sh"
 WEBSHOP_BOOTSTRAP = ROOT / "scripts" / "bootstrap_webshop.sh"
+EXPERIMENT_LOCK = ROOT / "requirements-experiments-lock.txt"
 WEBSHOP_SERVER_LOCK = ROOT / "requirements-webshop-server-lock.txt"
+LOCK_CHECKER = ROOT / "planu_core" / "distribution_lock.py"
 SCRIPT_TIMEOUT = 20
 
 
@@ -47,6 +50,66 @@ printf '%s\\n' "$FAKE_JAVA_VERSION_LINE" >&2
 """,
     )
     return version_line
+
+
+def write_fake_distributions(
+    site_packages,
+    lock_path,
+    *,
+    overrides=None,
+    omitted=(),
+    extras=None,
+    editables=None,
+):
+    overrides = overrides or {}
+    omitted = set(omitted)
+    extras = extras or {}
+    editables = editables or {}
+    packages = {}
+    for raw_line in lock_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        raw_name, version = line.split("==", 1)
+        name = re.sub(r"[-_.]+", "-", raw_name).lower()
+        if name not in omitted:
+            packages[name] = overrides.get(name, version)
+    packages.update(extras)
+    site_packages.mkdir(parents=True)
+    for index, (name, version) in enumerate(sorted(packages.items())):
+        metadata = site_packages / "{}-{}.dist-info".format(
+            name.replace("-", "_"),
+            index,
+        )
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: {}\nVersion: {}\n".format(
+                name,
+                version,
+            ),
+            encoding="utf-8",
+        )
+    for index, (name, origin) in enumerate(sorted(editables.items())):
+        metadata = site_packages / "{}_editable-{}.dist-info".format(
+            name.replace("-", "_"),
+            index,
+        )
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: {}\nVersion: 0.0.1\n".format(
+                name
+            ),
+            encoding="utf-8",
+        )
+        (metadata / "direct_url.json").write_text(
+            json.dumps(
+                {
+                    "dir_info": {"editable": True},
+                    "url": Path(origin).resolve().as_uri(),
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 def script_environment(bin_dir, **values):
@@ -89,6 +152,9 @@ def write_smoke_runner_fake(path):
     write_executable(
         path,
         r"""
+if [[ "${1:-}" == "$FAKE_LOCK_CHECKER" ]]; then
+  PYTHONPATH="$FAKE_CLIENT_SITE" exec "$FAKE_REAL_PYTHON" -S "$@"
+fi
 if [[ "${1:-}" == "-" ]]; then
   exec "$FAKE_REAL_PYTHON" "$@"
 fi
@@ -335,8 +401,15 @@ def local_smoke_environment(
     tmp_path,
     *,
     artifact_mode="valid",
+    client_extras=None,
+    client_omitted=(),
+    client_overrides=None,
+    client_editable_origins=None,
     java_version_line='openjdk version "11.0.22"',
     resistant=False,
+    server_extras=None,
+    server_omitted=(),
+    server_overrides=None,
 ):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -350,7 +423,36 @@ def local_smoke_environment(
     server_pid_log = tmp_path / "server.pid"
     child_pid_log = tmp_path / "child.pid"
     server_env_log = tmp_path / "server.env"
+    client_site = tmp_path / "client-site"
+    editable_origins = {
+        "gym-macro-overcooked": ROOT / "gym-macro-overcooked",
+        "virtual-home": ROOT / "virtual-home",
+    }
+    editable_origins.update(client_editable_origins or {})
+    write_fake_distributions(
+        client_site,
+        EXPERIMENT_LOCK,
+        overrides=client_overrides,
+        omitted=client_omitted,
+        extras={
+            "pip": "24.0",
+            "wheel": "0.45.1",
+            **(client_extras or {}),
+        },
+        editables=editable_origins,
+    )
+    server_site = tmp_path / "server-site"
+    write_fake_distributions(
+        server_site,
+        WEBSHOP_SERVER_LOCK,
+        overrides=server_overrides,
+        omitted=server_omitted,
+        extras=server_extras,
+    )
     server_source = r"""
+if [[ "${1:-}" == "$FAKE_LOCK_CHECKER" ]]; then
+  PYTHONPATH="$FAKE_SERVER_SITE" exec "$FAKE_REAL_PYTHON" -S "$@"
+fi
 if [[ "${1:-}" == "-c" ]]; then
   "$FAKE_REAL_PYTHON" - \
     "${FAKE_SERVER_PYTHON_VERSION:-3.8.13}" \
@@ -473,6 +575,8 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_ARTIFACT_MODE=artifact_mode,
         FAKE_CHILD_PID_LOG=str(child_pid_log),
         FAKE_COMMAND_LOG=str(command_log),
+        FAKE_CLIENT_SITE=str(client_site),
+        FAKE_LOCK_CHECKER=str(LOCK_CHECKER),
         FAKE_JAVA_VERSION_LINE=java_version_line,
         FAKE_PLANU_HEAD=planu_head,
         FAKE_PROJECT_ROOT=str(ROOT),
@@ -482,6 +586,7 @@ kill -0 "$server_pid" 2>/dev/null
         FAKE_SERVER_LOCK=str(WEBSHOP_SERVER_LOCK),
         FAKE_SERVER_LOCK_SHA256=server_lock_sha256,
         FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_SERVER_SITE=str(server_site),
         FAKE_SERVER_URL="http://127.0.0.1:3000",
         FAKE_WEBSHOP_PYTHON=str(env_prefix / "bin" / "python"),
         FAKE_WEBSHOP_ROOT=str(webshop_root),
@@ -500,6 +605,9 @@ def bootstrap_server_environment(
     *,
     include_java=True,
     java_version_line='openjdk version "11.0.22"',
+    server_extras=None,
+    server_omitted=(),
+    server_overrides=None,
 ):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -524,10 +632,20 @@ def bootstrap_server_environment(
         write_fake_java(java_bin / "java", java_version_line)
     server_pid_log = tmp_path / "server.pid"
     server_env_log = tmp_path / "server.env"
+    server_site = tmp_path / "server-site"
+    write_fake_distributions(
+        server_site,
+        WEBSHOP_SERVER_LOCK,
+        overrides=server_overrides,
+        omitted=server_omitted,
+        extras=server_extras,
+    )
     write_executable(
         env_prefix / "bin" / "python",
         """
-if [[ "$*" == *"platform.python_version"* ]]; then
+if [[ "${1:-}" == "$FAKE_LOCK_CHECKER" ]]; then
+  PYTHONPATH="$FAKE_SERVER_SITE" exec "$FAKE_REAL_PYTHON" -S "$@"
+elif [[ "$*" == *"platform.python_version"* ]]; then
   printf '3.8.13\n'
 elif [[ "$*" == *'version("Flask")'* ]]; then
   printf '2.1.2\n'
@@ -592,10 +710,12 @@ kill -0 "$(cat "$FAKE_SERVER_PID_LOG")" 2>/dev/null
         FAKE_GIT_LOG=str(git_log),
         FAKE_ENV_PREFIX=str(env_prefix),
         FAKE_IMPORT_LOG=str(tmp_path / "import.log"),
+        FAKE_LOCK_CHECKER=str(LOCK_CHECKER),
         FAKE_JAVA_VERSION_LINE=java_version_line,
         FAKE_REAL_PYTHON=sys.executable,
         FAKE_SERVER_ENV_LOG=str(server_env_log),
         FAKE_SERVER_PID_LOG=str(server_pid_log),
+        FAKE_SERVER_SITE=str(server_site),
         FAKE_WEBSHOP_TOPLEVEL=str(webshop_root),
         WEBSHOP_ENV_PREFIX=str(env_prefix),
         WEBSHOP_ROOT=str(webshop_root),
@@ -1990,6 +2110,8 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "python=3.8.13" in bootstrap
     assert "requirements-webshop-server.txt" in bootstrap
     assert "requirements-webshop-server-lock.txt" in bootstrap
+    assert "distribution_lock.py" in bootstrap
+    assert 'SERVER_CONDA_METADATA_EXEMPTIONS=""' in bootstrap
     assert "PIP_CONSTRAINT" in bootstrap
     assert "LOCK_SHA256" in bootstrap
     assert "Werkzeug==2.1.2" in bootstrap
@@ -2012,6 +2134,11 @@ def test_webshop_scripts_pin_source_and_require_real_smoke_contract():
     assert "WEBSHOP_URL" in smoke
     assert "server_runtime.json" in smoke
     assert "requirements-webshop-server-lock.txt" in smoke
+    assert "requirements-experiments-lock.txt" in smoke
+    assert "distribution_lock.py" in smoke
+    assert 'SERVER_CONDA_METADATA_EXEMPTIONS=""' in smoke
+    assert "gym-macro-overcooked=" in smoke
+    assert "virtual-home=" in smoke
     assert "lock_sha256" in smoke
     assert "platform.python_version" in smoke
     assert 'version("Flask")' in smoke
@@ -2343,6 +2470,43 @@ def test_webshop_bootstrap_rejects_wrong_small_data_digest(tmp_path):
     assert completed.returncode != 0
     assert "SHA-256" in completed.stderr
     assert "items_ins_v2_1000.json" in completed.stderr
+    assert not server_env_log.exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "omitted", "extras", "expected_name"),
+    [
+        ({"numpy": "0.0.0"}, (), None, "numpy"),
+        (None, ("requests",), None, "requests"),
+        (None, (), {"conda-metadata-probe": "1.0"}, "conda-metadata-probe"),
+    ],
+)
+def test_webshop_bootstrap_rejects_non_equal_server_distribution_set(
+    tmp_path,
+    overrides,
+    omitted,
+    extras,
+    expected_name,
+):
+    environment, _, _, _, server_env_log = bootstrap_server_environment(
+        tmp_path,
+        server_overrides=overrides,
+        server_omitted=omitted,
+        server_extras=extras,
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_BOOTSTRAP)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "server lock" in completed.stderr.lower()
+    assert expected_name in completed.stderr
     assert not server_env_log.exists()
 
 
@@ -2846,6 +3010,120 @@ while true; do sleep 1; done
 
 
 @pytest.mark.parametrize(
+    "name",
+    ["beautifulsoup4", "openai", "setuptools"],
+)
+def test_webshop_smoke_rejects_client_lock_version_mismatch_before_start(
+    tmp_path,
+    name,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        client_overrides={name: "0.0.0"},
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "experiment lock" in completed.stderr.lower()
+    assert name in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+def test_webshop_smoke_rejects_client_distribution_extra_before_start(
+    tmp_path,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        client_extras={"unexpected-package": "1.0"},
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "experiment lock" in completed.stderr.lower()
+    assert "unexpected-package" in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+def test_webshop_smoke_rejects_missing_client_distribution_before_start(
+    tmp_path,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        client_omitted=("requests",),
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "experiment lock" in completed.stderr.lower()
+    assert "requests" in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["gym-macro-overcooked", "virtual-home"],
+)
+def test_webshop_smoke_requires_local_editable_origin_before_start(
+    tmp_path,
+    name,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        client_editable_origins={name: tmp_path / "outside-project"},
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "editable" in completed.stderr.lower()
+    assert name in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
     ("variable", "version", "message"),
     [
         ("FAKE_SERVER_PYTHON_VERSION", "3.8.12", "Python version"),
@@ -2875,6 +3153,46 @@ def test_webshop_smoke_rejects_wrong_server_runtime_before_start(
 
     assert completed.returncode != 0
     assert message in completed.stderr
+    assert not server_pid_log.exists()
+    assert "python -m planu_core.webshop.runner" not in (
+        command_log.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "omitted", "extras", "expected_name"),
+    [
+        ({"numpy": "0.0.0"}, (), None, "numpy"),
+        (None, ("requests",), None, "requests"),
+        (None, (), {"conda-metadata-probe": "1.0"}, "conda-metadata-probe"),
+    ],
+)
+def test_webshop_smoke_rejects_non_equal_server_distribution_set_before_start(
+    tmp_path,
+    overrides,
+    omitted,
+    extras,
+    expected_name,
+):
+    environment, command_log, server_pid_log, _ = local_smoke_environment(
+        tmp_path,
+        server_overrides=overrides,
+        server_omitted=omitted,
+        server_extras=extras,
+    )
+
+    completed = subprocess.run(
+        ["bash", str(WEBSHOP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=SCRIPT_TIMEOUT,
+    )
+
+    assert completed.returncode != 0
+    assert "server lock" in completed.stderr.lower()
+    assert expected_name in completed.stderr
     assert not server_pid_log.exists()
     assert "python -m planu_core.webshop.runner" not in (
         command_log.read_text(encoding="utf-8")

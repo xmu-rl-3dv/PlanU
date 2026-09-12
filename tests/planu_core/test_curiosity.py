@@ -524,6 +524,7 @@ def test_compatibility_modules_reexport_their_public_names(
     completed = subprocess.run(
         [
             sys.executable,
+            "-S",
             "-c",
             """
 import importlib

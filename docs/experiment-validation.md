@@ -53,10 +53,13 @@ Install `requirements-experiments.txt` with
 including `openai==1.109.1` and its exact transitive dependencies. The lock
 contains 144 exact pins: the prior 143 resolved distributions plus the
 explicit build-tool pin `setuptools==66.1.1`, which is also present in the
-direct requirements. Then install the three editable packages as shown in the
-root README and run `scripts/smoke_phase_one.sh`. Full lock equality excludes
-only `pip`, `wheel`, and the three editable local distributions; no registry
-dependency may be omitted. The
+direct requirements. Then install the two editable benchmark packages shown in
+the root README and run `scripts/smoke_phase_one.sh`. Authoritative WebShop
+smoke compares the complete normalized installed mapping before server startup
+or runner execution. Full lock equality excludes only `pip`, `wheel`,
+`gym-macro-overcooked`, and `virtual-home`; both benchmark distributions must
+be editable installs rooted in this checkout. No registry dependency may be
+omitted or added. The
 OpenAI-compatible client is constructed lazily; dependency validation does
 not require a real key or API request.
 
@@ -117,6 +120,10 @@ inputs. On the validated macOS arm64 environment, server `pip check` reports
 `torch 1.11.0 is not supported on this platform` for the Conda-installed
 build; the exact distribution remains in the lock and is validated because it
 imports and the authoritative server smoke passes.
+Both bootstrap and authoritative smoke require exact equality between all
+distributions visible through `importlib.metadata` and the server lock before
+starting the server. The validated 138/138 Conda prefix requires no metadata
+exemptions, so its explicit exemption list is empty.
 
 ## WebShop reference configuration
 
@@ -221,7 +228,7 @@ exactly Python 3.8.13, Flask 2.1.2, and Werkzeug 2.1.2. The atomic
 `server_runtime.json` records those versions, the Java 11 version string, the
 pinned WebShop commit, the complete normalized package mapping, and its
 deterministic environment SHA-256. Final artifact validation recomputes that
-hash, verifies every lock distribution, and checks the recorded lock SHA-256.
+hash, verifies exact lock equality, and checks the recorded lock SHA-256.
 Client run metadata separately retains the selected `packages` field while
 adding the complete canonical installed-distribution mapping and its SHA-256;
 both full-map fields are part of `RUN_IDENTITY` during resume.
