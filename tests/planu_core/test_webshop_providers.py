@@ -10,6 +10,7 @@ from typing import get_type_hints
 
 import pytest
 
+from planu_core.adapters.webshop import WebShopAdapter
 from planu_core.interfaces import ActionCandidate, EnvironmentState
 from planu_core.text_backend import (
     GenerationResult,
@@ -236,13 +237,73 @@ def test_model_provider_requests_exact_count_parses_and_stably_deduplicates():
         "click[A[1]]",
     ],
 )
-def test_model_provider_rejects_malformed_or_ambiguous_completions(malformed):
+def test_model_provider_preserves_malformed_or_ambiguous_completions(malformed):
     backend = FakeBackend([result(malformed, "click[A2]")])
+    provider = ModelWebShopActionProvider(backend, candidate_count=2)
+    page_state = state()
+
+    actions = provider.actions(page_state, 0)
+
+    assert len(actions) == 2
+    invalid, valid = actions
+    assert invalid.key == ("invalid", " ".join(malformed.split()))
+    assert invalid.payload == malformed
+    assert invalid.text == malformed
+    assert isinstance(invalid.metadata["parse_error"], str)
+    assert invalid.metadata["parse_error"]
+    for field in ("prompt", "trajectory", "model_identifier"):
+        assert invalid.metadata[field] == valid.metadata[field]
+
+    adapter = WebShopAdapter(
+        types.SimpleNamespace(fetch=lambda *args, **kwargs: None),
+        "session-invalid",
+    )
+    transition = adapter.step(page_state, invalid, object())
+
+    assert transition.state.observation == "Invalid action!"
+    assert transition.reward == -1.0
+    assert transition.info["invalid_action"] is True
+
+
+def test_model_provider_stably_deduplicates_invalid_and_valid_actions():
+    backend = FakeBackend(
+        [
+            result(
+                "bad output",
+                "click[A1]",
+                "bad output",
+                "other bad output",
+                "click[A1]",
+            )
+        ]
+    )
+    provider = ModelWebShopActionProvider(backend, candidate_count=5)
+
+    actions = provider.actions(state(), 0)
+
+    assert [item.key for item in actions] == [
+        ("invalid", "bad output"),
+        ("click", "A1"),
+        ("invalid", "other bad output"),
+    ]
+    assert [item.payload for item in actions] == [
+        "bad output",
+        WebShopAction("click", "A1"),
+        "other bad output",
+    ]
+
+
+def test_model_provider_preserves_empty_output_as_deterministic_invalid_action():
+    backend = FakeBackend([result("", " \t\n")])
     provider = ModelWebShopActionProvider(backend, candidate_count=2)
 
     actions = provider.actions(state(), 0)
 
-    assert [item.text for item in actions] == ["click[A2]"]
+    assert len(actions) == 1
+    assert actions[0].key == ("invalid", "")
+    assert actions[0].payload == ""
+    assert actions[0].text == ""
+    assert actions[0].metadata["parse_error"]
 
 
 def test_model_provider_rejects_wrong_backend_completion_count():

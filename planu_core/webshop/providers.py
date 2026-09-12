@@ -130,6 +130,22 @@ def _candidate(action: WebShopAction, **metadata: Any) -> ActionCandidate:
     )
 
 
+def _invalid_candidate(
+    raw_output: str,
+    parse_error: ValueError,
+    **metadata: Any
+) -> ActionCandidate:
+    return ActionCandidate(
+        key=("invalid", " ".join(raw_output.split())),
+        payload=raw_output,
+        text=raw_output,
+        metadata={
+            **metadata,
+            "parse_error": str(parse_error),
+        },
+    )
+
+
 class _TokenAccounting:
     def __init__(self) -> None:
         self.prompt_tokens = 0
@@ -230,19 +246,24 @@ class ModelWebShopActionProvider(_TokenAccounting):
         for text in generated.texts:
             try:
                 action = self._extract_action(text)
-            except ValueError:
-                continue
-            if action.key in seen:
-                continue
-            seen.add(action.key)
-            candidates.append(
-                _candidate(
+                candidate = _candidate(
                     action,
                     prompt=prompt,
                     trajectory=trajectory,
                     model_identifier=self.backend.model_identifier,
                 )
-            )
+            except ValueError as error:
+                candidate = _invalid_candidate(
+                    text,
+                    error,
+                    prompt=prompt,
+                    trajectory=trajectory,
+                    model_identifier=self.backend.model_identifier,
+                )
+            if candidate.key in seen:
+                continue
+            seen.add(candidate.key)
+            candidates.append(candidate)
         return candidates
 
 
