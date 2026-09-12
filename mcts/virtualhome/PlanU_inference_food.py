@@ -1,4 +1,5 @@
 import argparse
+from contextlib import ExitStack
 import logging
 import os
 from pathlib import Path
@@ -216,11 +217,13 @@ def run(args) -> None:
     import virtual_home  # noqa: F401
 
     result_path, rnd_path = _build_run_paths(args, config_digest)
-    writer = SummaryWriter(result_path)
-    rnd_writer = SummaryWriter(rnd_path)
-    envs = None
+    resources = ExitStack()
     scorer = None
     try:
+        writer = SummaryWriter(result_path)
+        resources.callback(writer.close)
+        rnd_writer = SummaryWriter(rnd_path)
+        resources.callback(rnd_writer.close)
         _record_run_provenance(writer, effective_config, run_metadata)
         writer.add_text(
             "hyperparameters",
@@ -251,6 +254,7 @@ def run(args) -> None:
                 for index in range(args.num_envs)
             ]
         )
+        resources.callback(envs.close)
 
         search, scorer, config = build_planu_components(
             args,
@@ -325,10 +329,7 @@ def run(args) -> None:
             token_log.write(f"query_times={query_times}\n")
             token_log.write("--------------------------------------\n")
     finally:
-        if envs is not None:
-            envs.close()
-        writer.close()
-        rnd_writer.close()
+        resources.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

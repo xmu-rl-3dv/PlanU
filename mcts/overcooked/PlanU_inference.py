@@ -1,4 +1,5 @@
 import argparse
+from contextlib import ExitStack
 from importlib import metadata as importlib_metadata
 import os
 from pathlib import Path
@@ -313,11 +314,13 @@ def run(args) -> None:
         run_name,
         config_hash,
     )
-    writer = SummaryWriter(result_path)
-    rnd_writer = SummaryWriter(rnd_path)
-    envs = None
+    resources = ExitStack()
     scorer = None
     try:
+        writer = SummaryWriter(result_path)
+        resources.callback(writer.close)
+        rnd_writer = SummaryWriter(rnd_path)
+        resources.callback(rnd_writer.close)
         _record_run_provenance(writer, effective_config, run_metadata)
         writer.add_text(
             "hyperparameters",
@@ -375,6 +378,7 @@ def run(args) -> None:
                 for index in range(args.num_envs)
             ]
         )
+        resources.callback(envs.close)
         assert isinstance(
             envs.single_action_space,
             gym.spaces.Discrete,
@@ -449,10 +453,7 @@ def run(args) -> None:
         )
         print(scorer.total_llm_tokenizer_token)
     finally:
-        if envs is not None:
-            envs.close()
-        rnd_writer.close()
-        writer.close()
+        resources.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

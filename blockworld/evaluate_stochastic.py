@@ -31,7 +31,7 @@ from reasoners import LanguageModel, Reasoner, SearchConfig, WorldModel
 from reasoners.algorithm import MCTS, PlanU
 import reasoners.benchmark.bw_utils as utils
 from reasoners.benchmark import BWEvaluator
-from reasoners.lm import ExLlamaModel, HFModel
+from reasoners.lm import HFModel
 from planu_core.provenance import (
     build_effective_config,
     build_run_metadata,

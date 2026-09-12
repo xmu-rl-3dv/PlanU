@@ -95,6 +95,7 @@ python -m pip install -r requirements.txt
 python -m pip install easydict DI-engine
 python -m pip install -e .
 python -m pip install -e gym-macro-overcooked
+python -m pip install -e virtual-home
 ```
 
 The Overcooked example script enables RND, so DI-engine and easydict are required
@@ -137,11 +138,12 @@ not have unified-core execution instructions yet.
 ## Outputs And Provenance
 
 The Overcooked and VirtualHome runners use config-hashed result paths.
-Their TensorBoard logs record the effective configuration and run metadata,
-including the git commit, Python version, and dependency versions. BlockWorld
-writes JSON provenance to a config-hashed evaluator path containing the seed.
-Each run stores `effective_config.json` and `run_metadata.json`, including the
-same git commit, Python version, and dependency version metadata.
+Their TensorBoard text summaries record the effective configuration and run
+metadata, including the git commit, Python version, and dependency versions.
+BlockWorld writes JSON provenance to a config-hashed evaluator path containing
+the seed. BlockWorld writes both `effective_config.json` and
+`run_metadata.json`, including the same git commit, Python version, and
+dependency version metadata.
 
 ## Citation
 

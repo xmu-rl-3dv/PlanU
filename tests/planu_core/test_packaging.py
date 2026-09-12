@@ -16,6 +16,7 @@ EXPECTED_PACKAGE_MEMBERS = {
     "reasoners/algorithm/planU.py",
 }
 DECLARED_IMPORT_ROOTS = {
+    "accelerate",
     "anthropic",
     "bitsandbytes",
     "datasets",
@@ -34,6 +35,33 @@ DECLARED_IMPORT_ROOTS = {
     "torch",
     "tqdm",
     "transformers",
+}
+REQUIRED_RUNTIME_DEPENDENCIES = {
+    "accelerate",
+    "datasets",
+    "numpy",
+    "pddl==0.2.0",
+    "peft",
+    "pyyaml",
+    "requests",
+    "sentencepiece",
+    "tarski",
+    "torch",
+    "tqdm",
+    "transformers",
+}
+OPTIONAL_PROVIDER_DEPENDENCIES = {
+    "anthropic",
+    "bitsandbytes",
+    "di-engine",
+    "easydict",
+    "fairscale",
+    "google-generativeai",
+    "huggingface-hub",
+    "llama-cpp-python",
+    "openai",
+    "optimum",
+    "scipy",
 }
 
 
@@ -83,6 +111,40 @@ class PackagingTest(unittest.TestCase):
             requirements,
         )
 
+    def test_language_model_namespace_does_not_import_optional_providers(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                """
+import sys
+import types
+
+transformers = types.ModuleType("transformers")
+transformers.StoppingCriteriaList = list
+torch = types.ModuleType("torch")
+tqdm = types.ModuleType("tqdm")
+tqdm.tqdm = lambda items, **kwargs: items
+sys.modules["transformers"] = transformers
+sys.modules["torch"] = torch
+sys.modules["tqdm"] = tqdm
+sys.path.insert(0, {!r})
+
+import reasoners.lm
+
+assert "anthropic" not in sys.modules
+assert "google.generativeai" not in sys.modules
+assert "openai" not in sys.modules
+assert "fairscale" not in sys.modules
+""".format(os.fspath(REPOSITORY_ROOT / "blockworld")),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_distribution_contains_and_imports_shared_planu_core(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = Path(temporary_directory)
@@ -130,6 +192,33 @@ class PackagingTest(unittest.TestCase):
             self.assertIn("external benchmark data", readme.lower())
             self.assertIn("blockworld/examples", readme)
             self.assertEqual(metadata["Requires-Python"], ">=3.9")
+            self.assertEqual(
+                {
+                    requirement.lower()
+                    for requirement in metadata.get_all("Requires-Dist", [])
+                    if "extra ==" not in requirement
+                },
+                REQUIRED_RUNTIME_DEPENDENCIES,
+            )
+            optional_requirements = {
+                requirement.lower()
+                for requirement in metadata.get_all("Requires-Dist", [])
+                if "extra ==" in requirement
+            }
+            for dependency in OPTIONAL_PROVIDER_DEPENDENCIES:
+                self.assertTrue(
+                    any(
+                        requirement.startswith(dependency)
+                        for requirement in optional_requirements
+                    ),
+                    dependency,
+                )
+            self.assertEqual(
+                metadata["Home-page"],
+                "https://github.com/xmu-rl-3dv/PlanU",
+            )
+            self.assertTrue(metadata["Author"])
+            self.assertTrue(metadata["Author-email"])
 
             install_target = temporary_path / "installed"
             subprocess.run(
@@ -163,12 +252,17 @@ torch = types.ModuleType("torch")
 tqdm = types.ModuleType("tqdm")
 tqdm.tqdm = lambda items, **kwargs: items
 tqdm.trange = lambda *args, **kwargs: range(*args)
+requests = types.ModuleType("requests")
 sys.modules["transformers"] = transformers
 sys.modules["torch"] = torch
 sys.modules["tqdm"] = tqdm
+sys.modules["requests"] = requests
 sys.path.insert(0, {!r})
 
 import reasoners.algorithm.planU
+import reasoners.visualization
+
+assert callable(reasoners.visualization.main)
 """.format(os.fspath(install_target)),
                 ],
                 cwd=temporary_path,

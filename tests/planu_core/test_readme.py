@@ -172,6 +172,7 @@ def test_readme_documents_complete_overcooked_setup():
         "python -m pip install easydict DI-engine",
         "python -m pip install -e .",
         "python -m pip install -e gym-macro-overcooked",
+        "python -m pip install -e virtual-home",
     )
     assert all(command in installation_commands for command in required_commands)
     assert [installation_commands.index(command) for command in required_commands] == sorted(
@@ -237,6 +238,13 @@ def test_readme_scopes_provenance_to_supported_runners():
         "run_metadata.json",
     ):
         assert term in provenance
+    assert "TensorBoard text summaries" in provenance
+    assert re.search(
+        r"BlockWorld writes both `effective_config\.json` and "
+        r"`run_metadata\.json`",
+        provenance,
+    )
+    assert "Each run stores `effective_config.json`" not in provenance
 
 
 def test_readme_documents_blockworld_behavior_corrections():
