@@ -229,6 +229,7 @@ class PlanUSearch:
         node: LanguageNode,
         state: EnvironmentState,
         rng: np.random.Generator,
+        provider_visit_count: Optional[int] = None,
     ) -> None:
         if node.terminated or node.truncated or node.children:
             return
@@ -236,11 +237,14 @@ class PlanUSearch:
         if self.action_provider is None:
             candidates = list(self.adapter.actions(state, node.visit_count))
         else:
-            # run_iteration registers the current visit before expansion.
             candidates = list(
                 self.action_provider.actions(
                     state,
-                    max(0, node.visit_count - 1),
+                    (
+                        node.visit_count
+                        if provider_visit_count is None
+                        else provider_visit_count
+                    ),
                 )
             )
         if not candidates:
@@ -466,8 +470,14 @@ class PlanUSearch:
 
         for _ in range(self.config.max_depth):
             journal.snapshot_language(node)
+            provider_visit_count = node.visit_count
             node.visit_count += 1
-            self.expand(node, state, rng)
+            self.expand(
+                node,
+                state,
+                rng,
+                provider_visit_count=provider_visit_count,
+            )
             if not node.children:
                 node.truncated = True
                 truncated = True

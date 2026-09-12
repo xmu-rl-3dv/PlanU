@@ -89,6 +89,26 @@ def test_run_iteration_uses_explicit_provider_with_prior_visit_count():
     assert list(search.root.children) == ["advance"]
 
 
+def test_direct_expand_uses_current_visit_count_for_explicit_provider():
+    adapter = FakeAdapter()
+    provider = RecordingActionProvider()
+    search = PlanUSearch(
+        adapter,
+        UniformScorer(),
+        PlanUConfig(),
+        action_provider=provider,
+    )
+    state = adapter.reset()
+    root = search._ensure_root(state)
+    root.visit_count = 7
+
+    search.expand(root, state, np.random.default_rng(2))
+
+    assert provider.calls == [(state, 7)]
+    assert adapter.action_calls == 0
+    assert list(root.children) == ["advance"]
+
+
 def test_expand_uses_adapter_actions_by_default():
     adapter = RecordingAdapter()
     search = PlanUSearch(adapter, UniformScorer(), PlanUConfig())
