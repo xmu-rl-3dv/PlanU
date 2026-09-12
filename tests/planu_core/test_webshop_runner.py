@@ -81,11 +81,18 @@ class FakeSearch:
         self.calls = []
 
     def run_iteration(self, iteration, rng, reset_seed=None):
-        for filename in ("effective_config.json", "run_metadata.json"):
+        for filename in ("run_manifest.json",):
             payload = json.loads(
                 (self.output_dir / filename).read_text(encoding="utf-8")
             )
             assert isinstance(payload, dict)
+        for filename in ("effective_config.json", "run_metadata.json"):
+            path = self.output_dir / filename
+            if path.exists():
+                assert isinstance(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    dict,
+                )
         self.calls.append((iteration, reset_seed, rng))
         return self.outcomes[iteration]
 
@@ -438,7 +445,41 @@ def test_result_uses_best_observed_terminal_trajectory_and_valid_schema(
     }
 
 
-def test_provenance_is_written_before_search_and_redacts_urls(tmp_path):
+def test_terminal_maximum_stops_before_a_failing_second_iteration(tmp_path):
+    harness = DependencyHarness(tmp_path)
+    search = FakeSearch([], tmp_path)
+
+    def stop_after_success(iteration, rng, reset_seed=None):
+        del rng, reset_seed
+        search.calls.append(iteration)
+        if iteration == 0:
+            return trajectory(1.0, terminated=True)
+        raise AssertionError("second iteration must not execute")
+
+    search.run_iteration = stop_after_success
+    dependencies = replace(
+        harness.dependencies(),
+        search_factory=lambda *args, **kwargs: search,
+    )
+
+    assert run(
+        smoke_args(tmp_path, "--iterations", "3"),
+        dependencies=dependencies,
+    ) == 0
+
+    result = json.loads(
+        (tmp_path / "tasks" / "fixed_1.json").read_text(encoding="utf-8")
+    )
+    assert search.calls == [0]
+    assert result["best_terminal_reward"] == 1.0
+    assert result["success"] is True
+    assert result["search_iterations"] == 1
+
+
+def test_provenance_manifest_is_published_last_before_search_and_redacts_urls(
+    tmp_path,
+    monkeypatch,
+):
     harness = DependencyHarness(tmp_path)
     args = smoke_args(
         tmp_path,
@@ -446,6 +487,22 @@ def test_provenance_is_written_before_search_and_redacts_urls(tmp_path):
         "https://shop-user:shop-secret@shop.example:8443/path?key=hidden",
         "--base-url",
         "https://model-user:model-secret@model.example/v1?token=hidden",
+    )
+    published = []
+    real_atomic_write_json = webshop_runner.atomic_write_json
+
+    def recording_atomic_write(path, payload):
+        path = Path(path)
+        if path.name == "run_manifest.json":
+            assert (tmp_path / "effective_config.json").is_file()
+            assert (tmp_path / "run_metadata.json").is_file()
+        published.append(path.name)
+        real_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(
+        webshop_runner,
+        "atomic_write_json",
+        recording_atomic_write,
     )
 
     assert run(args, dependencies=harness.dependencies()) == 0
@@ -456,8 +513,15 @@ def test_provenance_is_written_before_search_and_redacts_urls(tmp_path):
     metadata = json.loads(
         (tmp_path / "run_metadata.json").read_text(encoding="utf-8")
     )
+    manifest = json.loads(
+        (tmp_path / "run_manifest.json").read_text(encoding="utf-8")
+    )
     serialized = json.dumps(
-        {"effective": effective, "metadata": metadata},
+        {
+            "effective": effective,
+            "metadata": metadata,
+            "manifest": manifest,
+        },
         sort_keys=True,
     )
     for secret in (
@@ -476,7 +540,274 @@ def test_provenance_is_written_before_search_and_redacts_urls(tmp_path):
     assert metadata["config_hash"]
     assert metadata["model_id"] == "scripted"
     assert metadata["webshop_commit"] == WEBSHOP_COMMIT
+    assert manifest == {
+        "effective_config": effective,
+        "run_metadata": metadata,
+    }
+    assert published[:3] == [
+        "effective_config.json",
+        "run_metadata.json",
+        "run_manifest.json",
+    ]
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "effective_config",
+        "config_hash",
+        "webshop_commit",
+        "planu_git_commit",
+    ],
+)
+def test_manifest_mismatch_refuses_reuse_before_altering_artifacts(
+    tmp_path,
+    mutation,
+):
+    first_harness = DependencyHarness(tmp_path)
+    args = smoke_args(tmp_path)
+    assert run(args, dependencies=first_harness.dependencies()) == 0
+
+    manifest_path = tmp_path / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "effective_config":
+        manifest["effective_config"]["args"]["seed"] = 999
+    elif mutation == "config_hash":
+        manifest["run_metadata"]["config_hash"] = "wrong-hash"
+    else:
+        manifest["run_metadata"][mutation] = "wrong-source"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    second_harness = DependencyHarness(tmp_path)
+
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=second_harness.dependencies())
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert second_harness.clients == []
+
+
+def test_matching_pre_manifest_sidecars_are_repaired_without_rewriting_them(
+    tmp_path,
+    monkeypatch,
+):
+    harness = DependencyHarness(tmp_path)
+    args = smoke_args(tmp_path)
+    assert run(args, dependencies=harness.dependencies()) == 0
+    (tmp_path / "run_manifest.json").unlink()
+    (tmp_path / "results.jsonl").unlink()
+    for task_path in (tmp_path / "tasks").iterdir():
+        task_path.unlink()
+    (tmp_path / "tasks").rmdir()
+    sidecars_before = {
+        name: (tmp_path / name).read_bytes()
+        for name in ("effective_config.json", "run_metadata.json")
+    }
+    published = []
+    real_atomic_write_json = webshop_runner.atomic_write_json
+
+    def recording_atomic_write(path, payload):
+        published.append(Path(path).name)
+        real_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(
+        webshop_runner,
+        "atomic_write_json",
+        recording_atomic_write,
+    )
+
+    assert run(
+        args,
+        dependencies=DependencyHarness(tmp_path).dependencies(),
+    ) == 0
+
+    assert published[0] == "run_manifest.json"
+    assert {
+        name: (tmp_path / name).read_bytes()
+        for name in sidecars_before
+    } == sidecars_before
+
+
+def test_incomplete_pre_manifest_sidecars_are_rejected_without_repair(
+    tmp_path,
+):
+    harness = DependencyHarness(tmp_path)
+    args = smoke_args(tmp_path)
+    assert run(args, dependencies=harness.dependencies()) == 0
+    (tmp_path / "run_manifest.json").unlink()
+    (tmp_path / "run_metadata.json").unlink()
+    (tmp_path / "results.jsonl").unlink()
+    for task_path in (tmp_path / "tasks").iterdir():
+        task_path.unlink()
+    (tmp_path / "tasks").rmdir()
+    before = (tmp_path / "effective_config.json").read_bytes()
+    second_harness = DependencyHarness(tmp_path)
+
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=second_harness.dependencies())
+
+    assert (tmp_path / "effective_config.json").read_bytes() == before
+    assert not (tmp_path / "run_metadata.json").exists()
+    assert not (tmp_path / "run_manifest.json").exists()
+    assert second_harness.clients == []
+
+
+def test_manifest_reuse_does_not_recreate_missing_convenience_sidecars(
+    tmp_path,
+):
+    args = smoke_args(tmp_path)
+    assert run(
+        args,
+        dependencies=DependencyHarness(tmp_path).dependencies(),
+    ) == 0
+    (tmp_path / "effective_config.json").unlink()
+    (tmp_path / "run_metadata.json").unlink()
+
+    assert run(
+        args,
+        dependencies=DependencyHarness(tmp_path).dependencies(),
+    ) == 0
+
+    assert not (tmp_path / "effective_config.json").exists()
+    assert not (tmp_path / "run_metadata.json").exists()
+
+
+def test_manifest_metadata_remains_authoritative_on_compatible_reuse(tmp_path):
+    args = smoke_args(tmp_path)
+    assert run(
+        args,
+        dependencies=DependencyHarness(tmp_path).dependencies(),
+    ) == 0
+    manifest_path = tmp_path / "run_manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    second_harness = DependencyHarness(tmp_path)
+
+    def changed_environment_metadata(package_distributions):
+        metadata = second_harness.metadata_factory(package_distributions)
+        metadata["python_version"] = "9.9.9"
+        metadata["packages"]["numpy"] = "changed-version"
+        return metadata
+
+    dependencies = replace(
+        second_harness.dependencies(),
+        metadata_factory=changed_environment_metadata,
+    )
+
+    assert run(args, dependencies=dependencies) == 0
+
+    result = json.loads(
+        (tmp_path / "tasks" / "fixed_1.json").read_text(encoding="utf-8")
+    )
+    assert manifest_path.read_bytes() == manifest_before
+    assert result["provenance"]["python_version"] == "3.9.6"
+    assert result["provenance"]["packages"]["numpy"] == "test-version"
+
+
+def test_output_directory_lock_refuses_concurrent_run_before_writes(
+    tmp_path,
+    monkeypatch,
+):
+    harness = DependencyHarness(tmp_path)
+
+    def locked(*args, **kwargs):
+        del args, kwargs
+        raise BlockingIOError
+
+    monkeypatch.setattr(webshop_runner.fcntl, "flock", locked)
+
+    with pytest.raises(WebShopRunnerError):
+        run(smoke_args(tmp_path), dependencies=harness.dependencies())
+
+    assert list(tmp_path.iterdir()) == []
+    assert harness.clients == []
+
+
+def test_task_failure_preserves_completed_per_task_artifacts(tmp_path):
+    harness = DependencyHarness(
+        tmp_path,
+        {
+            "fixed_1": [trajectory(0.4, terminated=True)],
+            "fixed_2": [],
+        },
+    )
+    args = parse_args(
+        [
+            "--smoke",
+            "--task-start-index",
+            "1",
+            "--task-end-index",
+            "3",
+            "--iterations",
+            "1",
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    with pytest.raises(WebShopRunnerError):
+        run(args, dependencies=harness.dependencies())
+
+    completed = json.loads(
+        (tmp_path / "tasks" / "fixed_1.json").read_text(encoding="utf-8")
+    )
+    assert completed["task_id"] == "fixed_1"
+    assert not (tmp_path / "tasks" / "fixed_2.json").exists()
+    assert not (tmp_path / "results.jsonl").exists()
+
+
+def test_results_are_consolidated_from_validated_task_files_in_task_order(
+    tmp_path,
+):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    second = {"task_id": "fixed_2", "task_index": 2}
+    first = {"task_id": "fixed_1", "task_index": 1}
+    for path, payload in (
+        (tasks_dir / "fixed_2.json", second),
+        (tasks_dir / "fixed_1.json", first),
+    ):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    webshop_runner._publish_results(tmp_path, 1, 3)
+
+    assert [
+        json.loads(line)
+        for line in (tmp_path / "results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ] == [first, second]
+
+
+def test_invalid_task_json_does_not_replace_existing_results(tmp_path):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "fixed_1.json").write_text("{broken", encoding="utf-8")
+    results_path = tmp_path / "results.jsonl"
+    results_path.write_text('{"old":true}\n', encoding="utf-8")
+
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        webshop_runner._publish_results(tmp_path, 1, 2)
+
+    assert results_path.read_text(encoding="utf-8") == '{"old":true}\n'
+
+
+def test_runner_has_no_cumulative_jsonl_append_helper():
+    source = Path(webshop_runner.__file__).read_text(encoding="utf-8")
+
+    assert "_atomic_append_json_line" not in source
 
 
 def test_model_token_usage_is_combined_per_task(tmp_path):

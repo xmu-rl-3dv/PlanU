@@ -1,14 +1,14 @@
 """Command-line runner for WebShop experiments through the shared PlanU core."""
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import sys
-import tempfile
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -18,10 +18,11 @@ import numpy as np
 from planu_core.config import PlanUConfig
 from planu_core.provenance import (
     PROVENANCE_DISTRIBUTIONS,
+    atomic_write_json,
+    atomic_write_text,
     build_effective_config,
     build_run_metadata,
     config_hash,
-    write_json_provenance,
 )
 from planu_core.search import PlanUSearch
 from planu_core.text_backend import (
@@ -45,6 +46,9 @@ WEBSHOP_DISTRIBUTIONS = {
     "beautifulsoup4": "beautifulsoup4",
     "openai": "openai",
 }
+RUN_MANIFEST = "run_manifest.json"
+EFFECTIVE_CONFIG_SIDECAR = "effective_config.json"
+RUN_METADATA_SIDECAR = "run_metadata.json"
 
 
 class WebShopRunnerError(RuntimeError):
@@ -267,9 +271,15 @@ def _safe_effective_config(
     safe_args = dict(vars(args))
     safe_args["webshop_url"] = _redact_url(args.webshop_url)
     safe_args["base_url"] = _redact_url(args.base_url)
-    return build_effective_config(
-        SimpleNamespace(**safe_args),
-        config,
+    return json.loads(
+        json.dumps(
+            build_effective_config(
+                SimpleNamespace(**safe_args),
+                config,
+            ),
+            allow_nan=False,
+            sort_keys=True,
+        )
     )
 
 
@@ -363,40 +373,130 @@ def _trajectory_payload(result: Any) -> list:
     return steps
 
 
-def _atomic_append_json_line(path: Path, payload: Mapping[str, Any]) -> None:
-    line = json.dumps(
-        payload,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ) + "\n"
-    existing = ""
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        for prior_line in existing.splitlines():
-            json.loads(prior_line)
-        if existing and not existing.endswith("\n"):
-            raise ValueError("existing results.jsonl is not newline terminated")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".results.jsonl.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
+@contextmanager
+def _lock_output_directory(output_dir: Path):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(str(output_dir), os.O_RDONLY)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(existing)
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-    except BaseException:
         try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
-        raise
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("output directory is in use") from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _load_json_object(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("{} must contain a JSON object".format(path.name))
+    return payload
+
+
+def _validate_manifest(
+    manifest: Mapping[str, Any],
+    effective_config: Mapping[str, Any],
+    run_metadata: Mapping[str, Any],
+) -> None:
+    stored_config = manifest.get("effective_config")
+    stored_metadata = manifest.get("run_metadata")
+    if stored_config != effective_config:
+        raise ValueError("run manifest effective config mismatch")
+    if not isinstance(stored_metadata, dict):
+        raise ValueError("run manifest metadata is invalid")
+
+    expected_hash = config_hash(effective_config)
+    if (
+        run_metadata.get("config_hash") != expected_hash
+        or stored_metadata.get("config_hash") != expected_hash
+    ):
+        raise ValueError("run manifest config hash mismatch")
+    for field in ("planu_git_commit", "webshop_commit"):
+        if stored_metadata.get(field) != run_metadata.get(field):
+            raise ValueError("run manifest pinned source mismatch")
+
+
+def _prepare_run_artifacts(
+    output_dir: Path,
+    effective_config: Mapping[str, Any],
+    run_metadata: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    manifest_path = output_dir / RUN_MANIFEST
+    effective_path = output_dir / EFFECTIVE_CONFIG_SIDECAR
+    metadata_path = output_dir / RUN_METADATA_SIDECAR
+    manifest_payload = {
+        "effective_config": effective_config,
+        "run_metadata": run_metadata,
+    }
+
+    if manifest_path.exists():
+        manifest = _load_json_object(manifest_path)
+        _validate_manifest(
+            manifest,
+            effective_config,
+            run_metadata,
+        )
+        return manifest["run_metadata"]
+
+    has_effective = effective_path.exists()
+    has_metadata = metadata_path.exists()
+    has_results = (output_dir / "results.jsonl").exists()
+    has_tasks = (output_dir / "tasks").exists()
+    if has_results or has_tasks:
+        raise ValueError("run artifacts exist without an authoritative manifest")
+    if has_effective != has_metadata:
+        raise ValueError("incomplete pre-manifest provenance sidecars")
+    if has_effective:
+        stored_effective = _load_json_object(effective_path)
+        stored_metadata = _load_json_object(metadata_path)
+        if (
+            stored_effective != effective_config
+            or stored_metadata != run_metadata
+        ):
+            raise ValueError("pre-manifest provenance sidecars mismatch")
+        atomic_write_json(manifest_path, manifest_payload)
+        return stored_metadata
+
+    atomic_write_json(effective_path, effective_config)
+    atomic_write_json(metadata_path, run_metadata)
+    atomic_write_json(manifest_path, manifest_payload)
+    return run_metadata
+
+
+def _task_path(output_dir: Path, task_index: int) -> Path:
+    return output_dir / "tasks" / "fixed_{}.json".format(task_index)
+
+
+def _load_task_result(output_dir: Path, task_index: int) -> Dict[str, Any]:
+    result = _load_json_object(_task_path(output_dir, task_index))
+    expected_id = "fixed_{}".format(task_index)
+    if (
+        result.get("task_id") != expected_id
+        or result.get("task_index") != task_index
+    ):
+        raise ValueError("task result identity mismatch for {}".format(expected_id))
+    return result
+
+
+def _publish_results(
+    output_dir: Path,
+    start_index: int,
+    end_index: int,
+) -> None:
+    lines = []
+    for task_index in range(start_index, end_index):
+        result = _load_task_result(output_dir, task_index)
+        lines.append(
+            json.dumps(
+                result,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    atomic_write_text(output_dir / "results.jsonl", "\n".join(lines) + "\n")
 
 
 def _task_result(
@@ -410,14 +510,18 @@ def _task_result(
     rng = np.random.default_rng(args.seed + task_index)
     best_terminal = None
     latency_failure_count = 0
+    search_iterations = 0
     for iteration in range(args.iterations):
         result = search.run_iteration(iteration, rng)
+        search_iterations += 1
         latency_failure_count += _latency_failures(result)
         if not result.terminated:
             continue
         reward = float(result.rewards[-1]) if result.rewards else 0.0
         if best_terminal is None or reward > best_terminal[0]:
             best_terminal = reward, result
+        if reward == 1.0:
+            break
 
     if best_terminal is None:
         best_reward = 0.0
@@ -433,7 +537,7 @@ def _task_result(
         "success": best_reward == 1.0,
         "trajectory": trajectory,
         "latency_failure_count": latency_failure_count,
-        "search_iterations": args.iterations,
+        "search_iterations": search_iterations,
         "max_depth": args.depth,
         "token_usage": _token_usage(provider, scorer),
         "error_status": None,
@@ -449,72 +553,89 @@ def _run(
     effective_config = _safe_effective_config(args, config)
     metadata = _run_metadata(args, effective_config, dependencies)
     output_dir = Path(args.output_dir)
-    write_json_provenance(output_dir, effective_config, metadata)
 
-    registered_ids = set()
-    with ExitStack() as stack:
-        client = dependencies.client_factory(
-            args.webshop_url,
-            timeout=(args.request_timeout, args.request_timeout),
+    with _lock_output_directory(output_dir):
+        authoritative_metadata = _prepare_run_artifacts(
+            output_dir,
+            effective_config,
+            metadata,
         )
-        _register_close(stack, client, registered_ids)
 
-        backend = None
-        if not args.smoke:
-            backend = dependencies.backend_factory(
-                model=args.backend,
-                base_url=args.base_url,
-                timeout=args.request_timeout,
+        registered_ids = set()
+        with ExitStack() as stack:
+            client = dependencies.client_factory(
+                args.webshop_url,
+                timeout=(args.request_timeout, args.request_timeout),
             )
-            _register_close(stack, backend, registered_ids)
+            _register_close(stack, client, registered_ids)
 
-        for task_index in range(
-            args.task_start_index,
-            args.task_end_index,
-        ):
-            task_id = "fixed_{}".format(task_index)
-            try:
-                adapter = dependencies.adapter_factory(client, task_id)
-                if args.smoke:
-                    provider = dependencies.scripted_provider_factory(
-                        search_query=args.smoke_search_query,
-                    )
-                    scorer = dependencies.scripted_scorer_factory()
-                else:
-                    provider = dependencies.model_provider_factory(
-                        backend,
-                        candidate_count=args.n_generate_sample,
-                        temperature=args.temperature,
-                    )
-                    scorer = dependencies.model_scorer_factory(
-                        backend,
-                        n_evaluate_sample=args.n_evaluate_sample,
-                        temperature=args.temperature,
-                    )
-                search = dependencies.search_factory(
-                    adapter,
-                    scorer,
-                    config,
-                    action_provider=provider,
+            backend = None
+            if not args.smoke:
+                backend = dependencies.backend_factory(
+                    model=args.backend,
+                    base_url=args.base_url,
+                    timeout=args.request_timeout,
                 )
-                result = _task_result(
-                    task_index,
-                    args,
-                    search,
-                    provider,
-                    scorer,
-                    metadata,
-                )
-                _atomic_append_json_line(
-                    output_dir / "results.jsonl",
-                    result,
-                )
-            except _SanitizedWebShopRunnerError:
-                raise
-            except Exception as error:
-                raise _SanitizedWebShopRunnerError(
-                    _safe_failure_summary(error, task_id)
-                ) from None
+                _register_close(stack, backend, registered_ids)
+
+            for task_index in range(
+                args.task_start_index,
+                args.task_end_index,
+            ):
+                task_id = "fixed_{}".format(task_index)
+                try:
+                    adapter = dependencies.adapter_factory(client, task_id)
+                    if args.smoke:
+                        provider = dependencies.scripted_provider_factory(
+                            search_query=args.smoke_search_query,
+                        )
+                        scorer = dependencies.scripted_scorer_factory()
+                    else:
+                        provider = dependencies.model_provider_factory(
+                            backend,
+                            candidate_count=args.n_generate_sample,
+                            temperature=args.temperature,
+                        )
+                        scorer = dependencies.model_scorer_factory(
+                            backend,
+                            n_evaluate_sample=args.n_evaluate_sample,
+                            temperature=args.temperature,
+                        )
+                    search = dependencies.search_factory(
+                        adapter,
+                        scorer,
+                        config,
+                        action_provider=provider,
+                    )
+                    result = _task_result(
+                        task_index,
+                        args,
+                        search,
+                        provider,
+                        scorer,
+                        authoritative_metadata,
+                    )
+                    atomic_write_json(
+                        _task_path(output_dir, task_index),
+                        result,
+                    )
+                except _SanitizedWebShopRunnerError:
+                    raise
+                except Exception as error:
+                    raise _SanitizedWebShopRunnerError(
+                        _safe_failure_summary(error, task_id)
+                    ) from None
+
+        try:
+            _publish_results(
+                output_dir,
+                args.task_start_index,
+                args.task_end_index,
+            )
+        except Exception as error:
+            raise _SanitizedWebShopRunnerError(
+                _safe_failure_summary(error, "results")
+            ) from None
     return 0
 
 

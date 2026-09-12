@@ -115,46 +115,55 @@ def record_run_provenance(
     )
 
 
+def atomic_write_text(path: Any, content: str) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".{}.".format(destination.name),
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_write_json(path: Any, payload: Mapping[str, Any]) -> None:
+    serialized = json.dumps(
+        payload,
+        allow_nan=False,
+        indent=2,
+        sort_keys=True,
+    )
+    atomic_write_text(path, serialized + "\n")
+
+
 def write_json_provenance(
     log_dir: Any,
     effective_config: Mapping[str, Any],
     run_metadata: Mapping[str, Any],
 ) -> None:
     directory = Path(log_dir)
-    directory.mkdir(parents=True, exist_ok=True)
     for filename, payload in (
         ("effective_config.json", effective_config),
         ("run_metadata.json", run_metadata),
     ):
-        destination = directory / filename
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".{}.".format(filename),
-            suffix=".tmp",
-            dir=str(directory),
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(
-                    payload,
-                    handle,
-                    allow_nan=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_name, destination)
-        except BaseException:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
+        atomic_write_json(directory / filename, payload)
 
 
 __all__ = [
     "PROVENANCE_DISTRIBUTIONS",
+    "atomic_write_json",
+    "atomic_write_text",
     "build_effective_config",
     "build_run_metadata",
     "config_hash",
