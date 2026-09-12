@@ -51,6 +51,13 @@ class WebShopRunnerError(RuntimeError):
     """Raised when runner infrastructure cannot complete an experiment."""
 
 
+def _safe_failure_summary(error: Exception, context: str) -> str:
+    return "WebShop infrastructure failure for {} ({})".format(
+        context,
+        type(error).__name__,
+    )
+
+
 class ScriptedWebShopActionScorer:
     """Credential-free deterministic scorer used by real-HTTP smoke runs."""
 
@@ -483,10 +490,7 @@ def _run(
                 raise
             except Exception as error:
                 raise WebShopRunnerError(
-                    "WebShop infrastructure failure for {}: {}".format(
-                        task_id,
-                        error,
-                    )
+                    _safe_failure_summary(error, task_id)
                 ) from error
     return 0
 
@@ -503,7 +507,7 @@ def run(
         raise
     except Exception as error:
         raise WebShopRunnerError(
-            "WebShop infrastructure failure: {}".format(error)
+            _safe_failure_summary(error, "runner")
         ) from error
 
 

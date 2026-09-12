@@ -1,4 +1,5 @@
 import ast
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -516,7 +517,7 @@ def test_runner_closes_clients_on_success(tmp_path, smoke):
     assert harness.backend.closed is (not smoke)
 
 
-def test_infrastructure_failure_is_clear_and_closes_clients(tmp_path):
+def test_infrastructure_failure_is_safe_and_closes_clients(tmp_path):
     harness = DependencyHarness(tmp_path, fail_iteration=True)
     args = parse_args(
         [
@@ -531,15 +532,90 @@ def test_infrastructure_failure_is_clear_and_closes_clients(tmp_path):
         ]
     )
 
-    with pytest.raises(
-        WebShopRunnerError,
-        match=r"fixed_4.*server unavailable",
-    ):
+    with pytest.raises(WebShopRunnerError) as raised:
         run(args, dependencies=harness.dependencies())
 
+    message = str(raised.value)
+    assert "fixed_4" in message
+    assert "ConnectionError" in message
+    assert "server unavailable" not in message
+    assert isinstance(raised.value.__cause__, ConnectionError)
     assert harness.client.closed is True
     assert harness.backend.closed is True
     assert not (tmp_path / "results.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_context"),
+    [
+        ("client", "runner"),
+        ("search", "fixed_7"),
+    ],
+)
+def test_failure_summary_does_not_leak_third_party_exception_text(
+    tmp_path,
+    failure_point,
+    expected_context,
+):
+    raw_message = (
+        "request failed for "
+        "https://url-user:url-password@shop.example/search"
+        "?token=secret-value"
+    )
+    harness = DependencyHarness(
+        tmp_path,
+        fail_iteration=failure_point == "search",
+    )
+    dependencies = harness.dependencies()
+
+    if failure_point == "client":
+
+        def failing_client_factory(*args, **kwargs):
+            del args, kwargs
+            raise ConnectionError(raw_message)
+
+        dependencies = replace(
+            dependencies,
+            client_factory=failing_client_factory,
+        )
+    else:
+        search = FakeSearch([], tmp_path)
+
+        def fail_search(*args, **kwargs):
+            del args, kwargs
+            raise ConnectionError(raw_message)
+
+        search.run_iteration = fail_search
+        dependencies = replace(
+            dependencies,
+            search_factory=lambda *args, **kwargs: search,
+        )
+
+    args = smoke_args(
+        tmp_path,
+        "--task-start-index",
+        "7",
+        "--task-end-index",
+        "8",
+    )
+
+    with pytest.raises(WebShopRunnerError) as raised:
+        run(args, dependencies=dependencies)
+
+    message = str(raised.value)
+    assert "WebShop infrastructure failure" in message
+    assert expected_context in message
+    assert "ConnectionError" in message
+    for sensitive_text in (
+        "url-user",
+        "url-password",
+        "?token=secret-value",
+        "token",
+        "secret-value",
+        raw_message,
+    ):
+        assert sensitive_text not in message
+    assert isinstance(raised.value.__cause__, ConnectionError)
 
 
 def test_openai_backend_close_releases_lazy_client_once():
