@@ -69,6 +69,7 @@ def state(
     asins=(),
     option_types=(),
     options=None,
+    history=None,
     terminated=False,
     truncated=False,
 ):
@@ -82,6 +83,8 @@ def state(
         truncated=truncated,
         private_secret="must-not-be-read",
     )
+    if history is not None:
+        runtime.history = tuple(history)
     return EnvironmentState(observation=observation, runtime=runtime)
 
 
@@ -223,6 +226,65 @@ def test_model_provider_requests_exact_count_parses_and_stably_deduplicates():
         "completion_tokens": 9,
         "total_tokens": 26,
     }
+
+
+def test_model_provider_and_scorer_preserve_cumulative_multistep_context():
+    history = (
+        "WebShop\nInstruction: find a red mug\n[Search]",
+        "Action: search[red mug]",
+        "Observation: [Back to Search]\n[A1] Red mug",
+        "Action: click[A1]",
+        "Observation: Color [Red][Blue]\n[Buy Now]",
+        "Action: click[Red]",
+        "Observation: You have clicked Red.",
+    )
+    provider_backend = FakeBackend(
+        [
+            result(
+                "click[Buy Now]",
+                "click[Buy Now]",
+                "click[Buy Now]",
+                "click[Buy Now]",
+                "click[Buy Now]",
+            )
+        ]
+    )
+    provider = ModelWebShopActionProvider(provider_backend)
+
+    actions = provider.actions(
+        state(
+            observation="You have clicked Red.",
+            history=history,
+        )
+    )
+
+    trajectory = "\n".join(history)
+    assert len(provider_backend.calls) == 1
+    assert provider_backend.calls[0]["n"] == 5
+    assert trajectory in provider_backend.calls[0]["prompt"]
+    assert actions[0].metadata["trajectory"] == trajectory
+
+    scorer_backend = FakeBackend(
+        [result("Thus the correctness score is 10")]
+    )
+    scorer = ModelWebShopActionScorer(scorer_backend)
+
+    assert scorer.score("You have clicked Red.", actions) == [1.0]
+    scoring_prompt = scorer_backend.calls[0]["prompt"]
+    assert trajectory in scoring_prompt
+    assert scoring_prompt.index("Instruction: find a red mug") < (
+        scoring_prompt.index("Action: search[red mug]")
+    )
+    assert scoring_prompt.index("Action: search[red mug]") < (
+        scoring_prompt.index("Action: click[A1]")
+    )
+    assert scoring_prompt.index("Action: click[A1]") < (
+        scoring_prompt.index("Observation: You have clicked Red.")
+    )
+    assert (
+        "{}\n\nAction: click[Buy Now]\n\nReflection: ".format(trajectory)
+        in scoring_prompt
+    )
 
 
 @pytest.mark.parametrize(
@@ -533,6 +595,32 @@ class FakeCompletions:
         return outcome
 
 
+class MaxFourCompletions:
+    def __init__(self):
+        self.calls = []
+        self.next_index = 0
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        batch_size = kwargs["n"]
+        if batch_size > 4:
+            raise FakeBadRequestError("n must not exceed four")
+        start = self.next_index
+        self.next_index += batch_size
+        usage = {
+            4: (11, 8),
+            1: (7, 2),
+        }[batch_size]
+        return response(
+            [
+                "candidate-{}".format(index)
+                for index in range(start, self.next_index)
+            ],
+            prompt_tokens=usage[0],
+            completion_tokens=usage[1],
+        )
+
+
 def response(texts, prompt_tokens=0, completion_tokens=0):
     return types.SimpleNamespace(
         choices=[
@@ -617,6 +705,78 @@ def test_openai_backend_is_lazy_uses_env_key_and_accounts_tokens(
         "completion_tokens": 5,
         "total_tokens": 28,
     }
+
+
+def test_openai_backend_batches_default_limit_preserving_order_and_usage(
+    monkeypatch,
+):
+    constructor_calls = []
+    completions = MaxFourCompletions()
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        fake_openai_module(completions, constructor_calls),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    backend = OpenAICompatibleBackend(model="model")
+
+    generated = backend.generate("prompt", 5, 0.8, 100, ())
+
+    assert backend.max_batch_size == 4
+    assert [call["n"] for call in completions.calls] == [4, 1]
+    assert generated == GenerationResult(
+        (
+            "candidate-0",
+            "candidate-1",
+            "candidate-2",
+            "candidate-3",
+            "candidate-4",
+        ),
+        prompt_tokens=18,
+        completion_tokens=10,
+    )
+    assert backend.token_usage == {
+        "prompt_tokens": 18,
+        "completion_tokens": 10,
+        "total_tokens": 28,
+    }
+
+
+def test_openai_backend_retries_each_batch_independently(monkeypatch):
+    constructor_calls = []
+    completions = FakeCompletions(
+        [
+            FakeTransientError("first batch retry"),
+            response(["zero", "one", "two", "three"]),
+            FakeTransientError("second batch retry"),
+            response(["four"]),
+        ]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        fake_openai_module(completions, constructor_calls),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    backend = OpenAICompatibleBackend(
+        model="model",
+        retry_limit=1,
+        retry_delay=0,
+    )
+
+    generated = backend.generate("prompt", 5, 0.2, 10, ())
+
+    assert generated.texts == ("zero", "one", "two", "three", "four")
+    assert [call["n"] for call in completions.calls] == [4, 4, 1, 1]
+
+
+@pytest.mark.parametrize("max_batch_size", [True, 0, -1, 1.5])
+def test_openai_backend_rejects_invalid_max_batch_size(max_batch_size):
+    with pytest.raises(ValueError, match="max_batch_size"):
+        OpenAICompatibleBackend(
+            model="model",
+            max_batch_size=max_batch_size,
+        )
 
 
 def test_openai_backend_import_and_missing_key_fail_only_on_generate(

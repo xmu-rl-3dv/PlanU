@@ -137,6 +137,9 @@ def make_state(
     observation=None,
     **runtime_overrides
 ):
+    current_observation = (
+        ITEM_PAGE.observation if observation is None else observation
+    )
     defaults = {
         "session_id": "session-7",
         "page_type": page_type,
@@ -148,6 +151,7 @@ def make_state(
         "buttons": ITEM_PAGE.buttons,
         "asins": (),
         "option_types": ITEM_PAGE.option_types,
+        "history": (str(current_observation),),
         "step_count": 3,
         "failure_count": 1,
         "terminated": False,
@@ -155,9 +159,7 @@ def make_state(
     }
     defaults.update(runtime_overrides)
     return EnvironmentState(
-        observation=(
-            ITEM_PAGE.observation if observation is None else observation
-        ),
+        observation=current_observation,
         runtime=WebShopRuntime(**defaults),
     )
 
@@ -174,6 +176,7 @@ def test_runtime_declares_the_complete_snapshot_schema():
         "buttons",
         "asins",
         "option_types",
+        "history",
         "step_count",
         "failure_count",
         "terminated",
@@ -212,11 +215,13 @@ def test_reset_fetches_the_init_page_and_builds_a_fresh_episode_snapshot():
         buttons=INIT_PAGE.buttons,
         asins=(),
         option_types=(),
+        history=(INIT_PAGE.observation,),
         step_count=0,
         failure_count=0,
         terminated=False,
         truncated=False,
     )
+    assert isinstance(second.runtime.history, tuple)
 
 
 def test_clone_deeply_isolates_observation_and_runtime():
@@ -253,6 +258,7 @@ def test_state_key_covers_observation_and_transition_relevant_runtime_fields():
         "buttons": ("< Prev",),
         "asins": ("A-3",),
         "option_types": (("Large", "Size"),),
+        "history": state.runtime.history + ("Observation: changed",),
         "terminated": True,
         "truncated": True,
     }
@@ -595,6 +601,53 @@ def test_search_is_legal_only_from_init_and_never_samples_latency():
     assert invalid.terminated is False
 
 
+def test_history_accumulates_valid_and_invalid_transitions_copy_safely():
+    client = FakeClient()
+    adapter = WebShopAdapter(client, "session-history")
+    initial = adapter.reset()
+
+    searched = adapter.step(
+        initial,
+        candidate("search", "red ceramic mug"),
+        ForbiddenRng(),
+    ).state
+    item = adapter.step(
+        searched,
+        candidate("click", "A-1"),
+        RecordingRng(1.0),
+    ).state
+    option = adapter.step(
+        item,
+        candidate("click", "Blue"),
+        RecordingRng(1.0),
+    ).state
+    invalid = adapter.step(
+        option,
+        candidate("search", "not legal here"),
+        ForbiddenRng(),
+    ).state
+
+    assert initial.runtime.history == (INIT_PAGE.observation,)
+    assert searched.runtime.history == (
+        INIT_PAGE.observation,
+        "Action: search[red ceramic mug]",
+        "Observation: {}".format(SEARCH_PAGE.observation),
+    )
+    assert item.runtime.history[-2:] == (
+        "Action: click[A-1]",
+        "Observation: {}".format(ITEM_PAGE.observation),
+    )
+    assert option.runtime.history[-2:] == (
+        "Action: click[Blue]",
+        "Observation: You have clicked Blue.",
+    )
+    assert invalid.runtime.history == option.runtime.history + (
+        "Action: search[not legal here]",
+        "Observation: Invalid action!",
+    )
+    assert isinstance(invalid.runtime.history, tuple)
+
+
 @pytest.mark.parametrize("reward", [0.0, 0.25, 1.0])
 def test_buy_now_always_terminates_for_the_full_reward_range(reward):
     client = FakeClient(reward=reward)
@@ -659,7 +712,15 @@ def test_invalid_model_actions_are_structured_nonterminal_results(action):
     result = adapter.step(state, action, ForbiddenRng())
 
     assert result.state.observation == "Invalid action!"
-    assert result.state.runtime == snapshot.runtime
+    for runtime_field in fields(WebShopRuntime):
+        if runtime_field.name != "history":
+            assert getattr(result.state.runtime, runtime_field.name) == (
+                getattr(snapshot.runtime, runtime_field.name)
+            )
+    assert result.state.runtime.history == snapshot.runtime.history + (
+        "Action: {}".format(action.text),
+        "Observation: Invalid action!",
+    )
     assert result.reward == -1.0
     assert result.terminated is False
     assert result.truncated is False
@@ -667,6 +728,23 @@ def test_invalid_model_actions_are_structured_nonterminal_results(action):
     assert isinstance(result.info["reason"], str)
     assert client.calls == []
     assert state == snapshot
+
+
+def test_invalid_parsed_action_history_uses_canonical_rendering():
+    adapter = WebShopAdapter(FakeClient(), "session-7")
+    state = make_state()
+    action = ActionCandidate(
+        key=("click", "not on this page"),
+        payload=WebShopAction("click", "not on this page"),
+        text="noncanonical display text",
+    )
+
+    result = adapter.step(state, action, ForbiddenRng())
+
+    assert result.state.runtime.history[-2:] == (
+        "Action: click[not on this page]",
+        "Observation: Invalid action!",
+    )
 
 
 def test_latency_failure_preserves_page_snapshot_and_increments_only_failures():
@@ -689,6 +767,7 @@ def test_latency_failure_preserves_page_snapshot_and_increments_only_failures():
     )
 
     assert result.state.observation == snapshot.observation
+    assert result.state.runtime.history == snapshot.runtime.history
     before = snapshot.runtime
     after = result.state.runtime
     for field in fields(WebShopRuntime):

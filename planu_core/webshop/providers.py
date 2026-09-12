@@ -226,7 +226,12 @@ class ModelWebShopActionProvider(_TokenAccounting):
         state_visit_count: int = 0,
     ) -> Sequence[ActionCandidate]:
         del state_visit_count
-        trajectory = _public_text(state.observation)
+        history = getattr(state.runtime, "history", None)
+        trajectory = (
+            "\n".join(history)
+            if history is not None
+            else _public_text(state.observation)
+        )
         prompt = LEGACY_COT_PROMPT.format(input=trajectory)
         generated = self.backend.generate(
             prompt,

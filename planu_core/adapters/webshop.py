@@ -36,6 +36,7 @@ class WebShopRuntime:
     buttons: Tuple[str, ...] = ()
     asins: Tuple[str, ...] = ()
     option_types: Tuple[Tuple[str, str], ...] = ()
+    history: Tuple[str, ...] = ()
     step_count: int = 0
     failure_count: int = 0
     terminated: bool = False
@@ -115,6 +116,7 @@ class WebShopAdapter:
                 buttons=tuple(page.buttons),
                 asins=tuple(page.asins),
                 option_types=tuple(page.option_types),
+                history=(page.observation,),
             ),
         )
 
@@ -186,7 +188,7 @@ class WebShopAdapter:
         next_state = self.clone(state)
         resolved, reason = self._resolve(next_state.runtime, action)
         if resolved is None:
-            return self._invalid_result(next_state, reason)
+            return self._invalid_result(next_state, action, reason)
         return self._transition(next_state, resolved)
 
     def step(
@@ -198,7 +200,7 @@ class WebShopAdapter:
         next_state = self.clone(state)
         resolved, reason = self._resolve(next_state.runtime, action)
         if resolved is None:
-            return self._invalid_result(next_state, reason)
+            return self._invalid_result(next_state, action, reason)
 
         if resolved.target not in ("search", "end"):
             latency = float(rng.lognormal(mean=0, sigma=10))
@@ -238,6 +240,7 @@ class WebShopAdapter:
             _freeze(runtime.buttons),
             _freeze(runtime.asins),
             _freeze(runtime.option_types),
+            _freeze(runtime.history),
             runtime.terminated,
             runtime.truncated,
         )
@@ -336,9 +339,15 @@ class WebShopAdapter:
     @staticmethod
     def _invalid_result(
         state: EnvironmentState,
+        action: ActionCandidate,
         reason: str,
     ) -> TransitionResult:
         state.observation = _INVALID_OBSERVATION
+        try:
+            rendered_action = WebShopAdapter._coerce_action(action).render()
+        except ValueError:
+            rendered_action = action.text
+        WebShopAdapter._append_history(state, rendered_action)
         return TransitionResult(
             state=state,
             reward=-1.0,
@@ -361,7 +370,7 @@ class WebShopAdapter:
 
         if target == "think":
             state.observation = _THINK_OBSERVATION
-            return self._result(state, 0.0)
+            return self._result(state, 0.0, resolved.action)
 
         if target == "init":
             page = self.client.fetch("init", runtime.session_id)
@@ -428,7 +437,7 @@ class WebShopAdapter:
                 raise ValueError("WebShop reward must be between 0 and 1")
             runtime.terminated = True
             self._apply_page(state, page)
-            return self._result(state, reward)
+            return self._result(state, reward, resolved.action)
         else:
             raise RuntimeError(
                 "unsupported resolved WebShop target: {}".format(target)
@@ -439,7 +448,7 @@ class WebShopAdapter:
             state.observation = "You have clicked {}.".format(
                 resolved.argument
             )
-        return self._result(state, float(page.reward))
+        return self._result(state, float(page.reward), resolved.action)
 
     def _fetch_search(self, runtime: WebShopRuntime) -> WebShopPage:
         return self.client.fetch(
@@ -481,13 +490,26 @@ class WebShopAdapter:
     def _result(
         state: EnvironmentState,
         reward: float,
+        action: WebShopAction,
     ) -> TransitionResult:
+        WebShopAdapter._append_history(state, action.render())
         return TransitionResult(
             state=state,
             reward=reward,
             terminated=bool(state.runtime.terminated),
             truncated=bool(state.runtime.truncated),
             info={},
+        )
+
+    @staticmethod
+    def _append_history(
+        state: EnvironmentState,
+        rendered_action: str,
+    ) -> None:
+        history = tuple(getattr(state.runtime, "history", ()))
+        state.runtime.history = history + (
+            "Action: {}".format(rendered_action),
+            "Observation: {}".format(state.observation),
         )
 
 

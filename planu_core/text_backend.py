@@ -68,6 +68,7 @@ class OpenAICompatibleBackend:
         retry_limit: int = 2,
         retry_delay: float = 0.5,
         client_factory: Optional[Callable[..., Any]] = None,
+        max_batch_size: int = 4,
     ) -> None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be a non-empty string")
@@ -97,12 +98,19 @@ class OpenAICompatibleBackend:
             raise ValueError("retry_delay must be a finite nonnegative number")
         if client_factory is not None and not callable(client_factory):
             raise ValueError("client_factory must be callable")
+        if (
+            isinstance(max_batch_size, bool)
+            or not isinstance(max_batch_size, int)
+            or max_batch_size <= 0
+        ):
+            raise ValueError("max_batch_size must be a positive integer")
 
         self._model = model.strip()
         self.base_url = base_url.strip() if base_url is not None else None
         self.timeout = float(timeout)
         self.retry_limit = retry_limit
         self.retry_delay = float(retry_delay)
+        self.max_batch_size = max_batch_size
         self._client_factory = client_factory
         self._client = None
         self._openai_module = None
@@ -206,6 +214,24 @@ class OpenAICompatibleBackend:
             texts.append(content)
         return texts
 
+    def _create_completion(
+        self,
+        client: Any,
+        request: Dict[str, Any],
+    ) -> Any:
+        for attempt in range(self.retry_limit + 1):
+            try:
+                return client.chat.completions.create(**request)
+            except Exception as error:
+                if (
+                    attempt >= self.retry_limit
+                    or not self._is_transient(error)
+                ):
+                    raise
+                if self.retry_delay:
+                    time.sleep(self.retry_delay * (2 ** attempt))
+        raise RuntimeError("OpenAI completion retries exhausted")
+
     def generate(
         self,
         prompt: str,
@@ -245,32 +271,28 @@ class OpenAICompatibleBackend:
         request = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
-            "n": n,
             "temperature": float(temperature),
             "max_tokens": max_tokens,
             "stop": list(stop_items) or None,
         }
-        for attempt in range(self.retry_limit + 1):
-            try:
-                response = client.chat.completions.create(**request)
-                break
-            except Exception as error:
-                if (
-                    attempt >= self.retry_limit
-                    or not self._is_transient(error)
-                ):
-                    raise
-                if self.retry_delay:
-                    time.sleep(self.retry_delay * (2 ** attempt))
-
-        usage = _field(response, "usage")
-        prompt_tokens = self._usage_count(usage, "prompt_tokens")
-        completion_tokens = self._usage_count(
-            usage,
-            "completion_tokens",
-        )
+        texts = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        for start in range(0, n, self.max_batch_size):
+            batch_size = min(self.max_batch_size, n - start)
+            response = self._create_completion(
+                client,
+                {**request, "n": batch_size},
+            )
+            texts.extend(self._response_texts(response))
+            usage = _field(response, "usage")
+            prompt_tokens += self._usage_count(usage, "prompt_tokens")
+            completion_tokens += self._usage_count(
+                usage,
+                "completion_tokens",
+            )
         generated = GenerationResult(
-            self._response_texts(response),
+            texts,
             prompt_tokens,
             completion_tokens,
         )
