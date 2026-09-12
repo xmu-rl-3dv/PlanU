@@ -1,16 +1,28 @@
 import json
+import math
+import re
 from dataclasses import dataclass
+from numbers import Real
 from typing import Mapping, Optional, Tuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
-from bs4.element import Comment, NavigableString, Tag
+from bs4.element import (
+    Comment,
+    Declaration,
+    Doctype,
+    NavigableString,
+    ProcessingInstruction,
+    Tag,
+)
 
 
 _REWARD_MARKER = "Your score (min 0.0, max 1.0)"
 _IGNORED_TAGS = frozenset(("style", "script", "head", "title", "meta"))
 _DEFAULT_TIMEOUT = (3.05, 30.0)
+_PATH_SEPARATOR_RUN = re.compile(r"[/\\]+")
+_NON_CONTENT_STRINGS = (Comment, Declaration, Doctype, ProcessingInstruction)
 
 
 class WebShopPageError(ValueError):
@@ -31,7 +43,7 @@ class WebShopPage:
 
 
 def _is_visible_string(node: NavigableString) -> bool:
-    if isinstance(node, Comment):
+    if isinstance(node, _NON_CONTENT_STRINGS):
         return False
 
     parent = node.parent
@@ -195,20 +207,54 @@ def _encode_component(value: object) -> str:
     return quote(str(value), safe="")
 
 
+def _encode_path_component(name: str, value: object) -> str:
+    text = str(value)
+    if _PATH_SEPARATOR_RUN.search(text):
+        raise ValueError(
+            "WebShop {} cannot contain '/' or '\\\\'".format(name)
+        )
+    return _encode_component(text)
+
+
+def _encode_query_string(value: object) -> str:
+    normalized = _PATH_SEPARATOR_RUN.sub(" ", str(value))
+    return _encode_component(normalized)
+
+
 def _canonical_options(options: Optional[Mapping[str, str]]) -> str:
     if options is None:
         options = {}
     if not isinstance(options, Mapping):
         raise ValueError("WebShop options must be a mapping")
     try:
-        return json.dumps(
+        serialized = json.dumps(
             dict(options),
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
         )
+        return serialized.replace("/", "\\u002f")
     except (TypeError, ValueError) as error:
         raise ValueError("WebShop options must be JSON-serializable") from error
+
+
+def _normalize_timeout(timeout: Tuple[float, float]) -> Tuple[float, float]:
+    if not isinstance(timeout, tuple) or len(timeout) != 2:
+        raise ValueError("WebShop timeout must be a (connect, read) tuple")
+
+    normalized = []
+    for value in timeout:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(
+                "WebShop timeout entries must be finite positive real numbers"
+            )
+        normalized.append(float(value))
+    return normalized[0], normalized[1]
 
 
 def _safe_url(url: str) -> str:
@@ -232,14 +278,26 @@ class WebShopHttpClient:
     ) -> None:
         if not isinstance(base_url, str) or not base_url.rstrip("/"):
             raise ValueError("WebShop base URL must be a non-empty string")
-        if not isinstance(timeout, tuple) or len(timeout) != 2:
-            raise ValueError(
-                "WebShop timeout must be a (connect, read) tuple"
-            )
 
+        normalized_timeout = _normalize_timeout(timeout)
         self.base_url = base_url.rstrip("/")
+        self._owns_session = session is None
         self.session = session if session is not None else requests.Session()
-        self.timeout = timeout
+        self.timeout = normalized_timeout
+        self._closed = False
+
+    def __enter__(self) -> "WebShopHttpClient":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_session:
+            self.session.close()
 
     def _build_url(
         self,
@@ -251,12 +309,15 @@ class WebShopHttpClient:
         options: Optional[Mapping[str, str]],
         subpage: str,
     ) -> str:
-        encoded_session = _encode_component(session_id)
+        encoded_session = _encode_path_component("session_id", session_id)
+        encoded_asin = _encode_path_component("asin", asin)
+        encoded_subpage = _encode_path_component("subpage", subpage)
+        encoded_query = _encode_query_string(query_string)
         encoded_options = _encode_component(_canonical_options(options))
         done_route = (
             "done",
             encoded_session,
-            _encode_component(asin),
+            encoded_asin,
             encoded_options,
         )
         routes = {
@@ -264,24 +325,24 @@ class WebShopHttpClient:
             "search": (
                 "search_results",
                 encoded_session,
-                _encode_component(query_string),
+                encoded_query,
                 _encode_component(page_num),
             ),
             "item": (
                 "item_page",
                 encoded_session,
-                _encode_component(asin),
-                _encode_component(query_string),
+                encoded_asin,
+                encoded_query,
                 _encode_component(page_num),
                 encoded_options,
             ),
             "item_sub": (
                 "item_sub_page",
                 encoded_session,
-                _encode_component(asin),
-                _encode_component(query_string),
+                encoded_asin,
+                encoded_query,
                 _encode_component(page_num),
-                _encode_component(subpage),
+                encoded_subpage,
                 encoded_options,
             ),
             "end": done_route,

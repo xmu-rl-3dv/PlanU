@@ -1,7 +1,10 @@
+import ast
 from dataclasses import FrozenInstanceError
+from urllib.parse import unquote
 
 import pytest
 import requests
+from flask import Flask
 
 from planu_core.webshop.client import (
     WebShopHttpClient,
@@ -35,12 +38,16 @@ class FakeSession:
         self.responses = list(responses or [FakeResponse()])
         self.error = error
         self.calls = []
+        self.close_calls = 0
 
     def get(self, url, timeout):
         self.calls.append((url, timeout))
         if self.error is not None:
             raise self.error
         return self.responses.pop(0)
+
+    def close(self):
+        self.close_calls += 1
 
 
 def test_page_is_frozen_and_defaults_to_empty_structured_values():
@@ -108,6 +115,28 @@ def test_parse_search_page_preserves_button_asin_and_visible_text_order():
     )
     assert page.observation.index("[A-1]") < page.observation.index("First shoe")
     assert page.observation.index("First shoe") < page.observation.index("[A-2]")
+    assert "Instruction:" not in page.observation
+    assert "Find shoes" not in page.observation
+
+
+def test_parse_search_page_excludes_doctype_before_legacy_instruction_suppression():
+    page = parse_page(
+        """
+        <!DOCTYPE html>
+        <html>
+          <body>
+            <div>Instruction:</div><div>Find shoes</div>
+            <button>Back to Search</button>
+            <h3>Page 1</h3>
+            <a class="product-link" href="/one">A-1</a>
+            <h4>First shoe</h4><h5>$10</h5>
+          </body>
+        </html>
+        """
+    )
+
+    assert page.observation.startswith("\n[Back to Search] ")
+    assert "html" not in page.observation
     assert "Instruction:" not in page.observation
     assert "Find shoes" not in page.observation
 
@@ -224,46 +253,46 @@ def test_parse_page_rejects_missing_or_malformed_reward_contextually(html):
 @pytest.mark.parametrize(
     ("page_type", "kwargs", "expected_path"),
     [
-        ("init", {}, "/session%20%2F%3F"),
+        ("init", {}, "/session%20%3F"),
         (
             "search",
-            {"query_string": "red shoes/50%", "page_num": 2},
-            "/search_results/session%20%2F%3F/red%20shoes%2F50%25/2",
+            {"query_string": "red shoes//50%\\off", "page_num": 2},
+            "/search_results/session%20%3F/red%20shoes%2050%25%20off/2",
         ),
         (
             "item",
             {
-                "asin": "A/B ?",
+                "asin": "A-B ?",
                 "query_string": "red shoes",
                 "page_num": 3,
                 "options": {"size": "M/L", "color": "red blue"},
             },
             (
-                "/item_page/session%20%2F%3F/A%2FB%20%3F/red%20shoes/3/"
+                "/item_page/session%20%3F/A-B%20%3F/red%20shoes/3/"
                 "%7B%22color%22%3A%22red%20blue%22%2C"
-                "%22size%22%3A%22M%2FL%22%7D"
+                "%22size%22%3A%22M%5Cu002fL%22%7D"
             ),
         ),
         (
             "item_sub",
             {
-                "asin": "A/B ?",
+                "asin": "A-B ?",
                 "query_string": "red shoes",
                 "page_num": 3,
-                "subpage": "Reviews / Q&A",
+                "subpage": "Reviews & Q&A",
                 "options": {"color": "red blue"},
             },
             (
-                "/item_sub_page/session%20%2F%3F/A%2FB%20%3F/"
-                "red%20shoes/3/Reviews%20%2F%20Q%26A/"
+                "/item_sub_page/session%20%3F/A-B%20%3F/"
+                "red%20shoes/3/Reviews%20%26%20Q%26A/"
                 "%7B%22color%22%3A%22red%20blue%22%7D"
             ),
         ),
         (
             "done",
-            {"asin": "A/B ?", "options": {"color": "red blue"}},
+            {"asin": "A-B ?", "options": {"color": "red blue"}},
             (
-                "/done/session%20%2F%3F/A%2FB%20%3F/"
+                "/done/session%20%3F/A-B%20%3F/"
                 "%7B%22color%22%3A%22red%20blue%22%7D"
             ),
         ),
@@ -281,12 +310,85 @@ def test_fetch_builds_official_encoded_routes(
         timeout=(1.5, 9.0),
     )
 
-    page = client.fetch(page_type, "session /?", **kwargs)
+    page = client.fetch(page_type, "session ?", **kwargs)
 
     assert page.buttons == ("Continue",)
     assert session.calls == [
         ("https://shop.example.test" + expected_path, (1.5, 9.0))
     ]
+    assert "%2F" not in session.calls[0][0].upper()
+
+
+@pytest.mark.parametrize(
+    ("page_type", "field", "value", "kwargs"),
+    [
+        ("init", "session_id", "session/id", {}),
+        ("init", "session_id", "session\\id", {}),
+        ("item", "asin", "A/B", {"asin": "A/B"}),
+        ("item", "asin", "A\\B", {"asin": "A\\B"}),
+        (
+            "item_sub",
+            "subpage",
+            "Reviews/Q&A",
+            {"asin": "A-B", "subpage": "Reviews/Q&A"},
+        ),
+        (
+            "item_sub",
+            "subpage",
+            "Reviews\\Q&A",
+            {"asin": "A-B", "subpage": "Reviews\\Q&A"},
+        ),
+    ],
+)
+def test_fetch_rejects_slashes_in_ordinary_path_components(
+    page_type,
+    field,
+    value,
+    kwargs,
+):
+    session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=session,
+    )
+
+    if field == "session_id":
+        session_id = value
+    else:
+        session_id = "session"
+
+    with pytest.raises(ValueError, match=field):
+        client.fetch(page_type, session_id, **kwargs)
+
+    assert session.calls == []
+
+
+def test_flask_decodes_percent_encoded_slash_before_route_matching():
+    app = Flask(__name__)
+
+    @app.get("/item/<asin>")
+    def item(asin):
+        return asin
+
+    response = app.test_client().get("/item/M%2FL")
+
+    assert response.status_code == 404
+
+
+def test_fetch_options_escape_slash_and_round_trip_for_official_literal_eval():
+    session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=session,
+    )
+
+    client.fetch("item", "session", asin="A-B", options={"size": "M/L"})
+
+    url = session.calls[0][0]
+    encoded_options = url.rsplit("/", 1)[-1]
+    assert "%2F" not in url.upper()
+    assert "%5Cu002f" in encoded_options
+    assert ast.literal_eval(unquote(encoded_options)) == {"size": "M/L"}
 
 
 def test_fetch_builds_search_route_with_official_keyword_names():
@@ -298,7 +400,7 @@ def test_fetch_builds_search_route_with_official_keyword_names():
 
     client.fetch(
         page_type="search",
-        session_id="fixed / 1",
+        session_id="fixed_1",
         query_string="red mug/large",
         page_num=4,
     )
@@ -306,7 +408,7 @@ def test_fetch_builds_search_route_with_official_keyword_names():
     assert session.calls == [
         (
             "https://shop.example.test/search_results/"
-            "fixed%20%2F%201/red%20mug%2Flarge/4",
+            "fixed_1/red%20mug%20large/4",
             (3.05, 30.0),
         )
     ]
@@ -321,14 +423,14 @@ def test_fetch_maps_end_page_type_to_official_done_route():
 
     client.fetch(
         page_type="end",
-        session_id="fixed / 1",
-        asin="A/B",
+        session_id="fixed_1",
+        asin="A-B",
         options={"color": "red blue"},
     )
 
     assert session.calls == [
         (
-            "https://shop.example.test/done/fixed%20%2F%201/A%2FB/"
+            "https://shop.example.test/done/fixed_1/A-B/"
             "%7B%22color%22%3A%22red%20blue%22%7D",
             (3.05, 30.0),
         )
@@ -367,6 +469,67 @@ def test_client_creation_does_not_make_a_request():
     WebShopHttpClient("https://shop.example.test", session=session)
 
     assert session.calls == []
+
+
+@pytest.mark.parametrize("invalid_timeout", [0, -1, "1", float("nan"), float("inf"), True])
+@pytest.mark.parametrize("index", [0, 1])
+def test_client_rejects_invalid_timeout_entries(invalid_timeout, index):
+    timeout = [1.0, 2.0]
+    timeout[index] = invalid_timeout
+
+    with pytest.raises(ValueError, match="timeout"):
+        WebShopHttpClient(
+            "https://shop.example.test",
+            timeout=tuple(timeout),
+        )
+
+
+def test_client_normalizes_timeout_entries_to_floats():
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=FakeSession(),
+        timeout=(1, 2),
+    )
+
+    assert client.timeout == (1.0, 2.0)
+    assert all(isinstance(value, float) for value in client.timeout)
+
+
+def test_close_is_idempotent_and_closes_owned_session(monkeypatch):
+    owned_session = FakeSession()
+    monkeypatch.setattr(requests, "Session", lambda: owned_session)
+    client = WebShopHttpClient("https://shop.example.test")
+
+    client.close()
+    client.close()
+
+    assert owned_session.close_calls == 1
+
+
+def test_close_does_not_close_injected_session_by_default():
+    injected_session = FakeSession()
+    client = WebShopHttpClient(
+        "https://shop.example.test",
+        session=injected_session,
+    )
+
+    client.close()
+    client.close()
+
+    assert injected_session.close_calls == 0
+
+
+def test_client_context_manager_returns_self_and_closes_owned_session(
+    monkeypatch,
+):
+    owned_session = FakeSession()
+    monkeypatch.setattr(requests, "Session", lambda: owned_session)
+
+    with WebShopHttpClient("https://shop.example.test") as client:
+        assert isinstance(client, WebShopHttpClient)
+        assert owned_session.close_calls == 0
+
+    assert owned_session.close_calls == 1
 
 
 def test_fetch_wraps_non_success_status_without_exposing_credentials():
