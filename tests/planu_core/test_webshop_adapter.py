@@ -58,6 +58,7 @@ class FakeClient:
     def __init__(self, reward=0.75):
         self.reward = reward
         self.calls = []
+        self.item_page = ITEM_PAGE
 
     def fetch(self, page_type, session_id, **kwargs):
         self.calls.append(
@@ -75,7 +76,7 @@ class FakeClient:
                 ),
             )
         if page_type == "item":
-            return ITEM_PAGE
+            return self.item_page
         if page_type == "item_sub":
             return SUBPAGE
         if page_type == "end":
@@ -497,6 +498,12 @@ def test_item_detail_buttons_open_the_matching_subpage(subpage):
 
 def test_item_option_click_updates_its_option_type_and_refetches_item():
     client = FakeClient()
+    client.item_page = replace(
+        ITEM_PAGE,
+        buttons=("Refetched button",),
+        asins=("REFETCHED-ASIN",),
+        option_types=(("Medium", "Size"),),
+    )
     adapter = WebShopAdapter(client, "session-7")
     state = make_state(options={})
 
@@ -507,9 +514,10 @@ def test_item_option_click_updates_its_option_type_and_refetches_item():
     )
 
     assert result.state.runtime.options == {"color": "Blue"}
-    assert result.state.observation == (
-        "You have clicked Blue.\n" + ITEM_PAGE.observation
-    )
+    assert result.state.observation == "You have clicked Blue."
+    assert result.state.runtime.buttons == ("Refetched button",)
+    assert result.state.runtime.asins == ("REFETCHED-ASIN",)
+    assert result.state.runtime.option_types == (("Medium", "Size"),)
     assert state.runtime.options == {}
     assert client.calls[-1] == (
         "item",

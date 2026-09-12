@@ -436,9 +436,8 @@ class WebShopAdapter:
 
         self._apply_page(state, page)
         if target == "option":
-            state.observation = "You have clicked {}.\n{}".format(
-                resolved.argument,
-                state.observation,
+            state.observation = "You have clicked {}.".format(
+                resolved.argument
             )
         return self._result(state, float(page.reward))
 
