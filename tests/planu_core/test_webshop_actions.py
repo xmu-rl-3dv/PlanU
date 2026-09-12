@@ -2,7 +2,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from planu_core.webshop import WebShopAction, parse_webshop_action
+from planu_core.webshop import WebShopAction, parse_action
+from planu_core.webshop.actions import parse_action as parse_action_from_actions
 
 
 @pytest.mark.parametrize("kind", ["search", "click", "think"])
@@ -43,6 +44,13 @@ def test_action_is_hashable_and_immutable():
         action.argument = "red shoes"
 
 
+def test_parser_is_exported_from_actions_and_package():
+    expected = WebShopAction("search", "blue shoes")
+
+    assert parse_action("search[blue shoes]") == expected
+    assert parse_action_from_actions("search[blue shoes]") == expected
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -58,7 +66,7 @@ def test_parser_accepts_only_supported_actions_case_insensitively(
     text,
     expected,
 ):
-    assert parse_webshop_action(text) == expected
+    assert parse_action(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -84,10 +92,10 @@ def test_parser_accepts_only_supported_actions_case_insensitively(
 )
 def test_parser_rejects_empty_malformed_nested_and_prefixed_actions(text):
     with pytest.raises(ValueError, match="WebShop action"):
-        parse_webshop_action(text)
+        parse_action(text)
 
 
 @pytest.mark.parametrize("value", [None, 7, object(), ["search[item]"]])
 def test_parser_defensively_rejects_non_string_values(value):
     with pytest.raises(ValueError, match="WebShop action"):
-        parse_webshop_action(value)
+        parse_action(value)

@@ -1,3 +1,3 @@
-from .actions import WebShopAction, parse_webshop_action
+from .actions import WebShopAction, parse_action
 
-__all__ = ["WebShopAction", "parse_webshop_action"]
+__all__ = ["WebShopAction", "parse_action"]

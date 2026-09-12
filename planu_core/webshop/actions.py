@@ -39,7 +39,7 @@ class WebShopAction:
         return "{}[{}]".format(self.kind, self.argument)
 
 
-def parse_webshop_action(value: str) -> WebShopAction:
+def parse_action(value: str) -> WebShopAction:
     if not isinstance(value, str):
         raise ValueError("WebShop action must be a string")
 
@@ -50,4 +50,4 @@ def parse_webshop_action(value: str) -> WebShopAction:
     return WebShopAction(match.group("kind"), match.group("argument"))
 
 
-__all__ = ["WebShopAction", "parse_webshop_action"]
+__all__ = ["WebShopAction", "parse_action"]
